@@ -25,6 +25,7 @@ class SearchHit(BaseModel):
     chunk_index: int
     content: str
     similarity: float
+    page_number: int | None = None
 
 
 class SearchResponse(BaseModel):

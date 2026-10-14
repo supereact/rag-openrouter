@@ -3,11 +3,11 @@ import psycopg
 from fastapi import FastAPI, HTTPException, File, UploadFile
 
 from app.db import db_connection
-from app.file_ingestion import MAX_FILE_BYTES, extract_document
+from app.file_ingestion import MAX_FILE_BYTES, extract_document, extract_pdf_pages
 from app.schemas import (
     AskResponse, IngestRequest, IngestResponse, SearchRequest, SearchResponse
 )
-from app.services import ingest_document, search_documents, answer_question
+from app.services import ingest_document, ingest_pdf_pages, search_documents, answer_question
 
 app = FastAPI(
     title="Enterprise RAG Knowledge Assistant — Local MVP",
@@ -61,12 +61,34 @@ def upload_document(file: UploadFile = File(...)):
         # Read at most limit + 1 so oversized files can be rejected.
         data = file.file.read(MAX_FILE_BYTES + 1)
         title, text = extract_document(file.filename or "", data)
-        doc_id, count, exists = ingest_document(title, text)
+        if title.lower().endswith(".pdf"):
+            pages = extract_pdf_pages(title, data)
+            doc_id, count, exists = ingest_pdf_pages(title, pages)
+        else:
+            doc_id, count, exists = ingest_document(title, text)
         return IngestResponse(
             document_id=doc_id,
             chunk_count=count,
             already_exists=exists,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        file.file.close()
+
+
+@app.post("/documents/{document_id}/reindex-pdf", response_model=IngestResponse)
+def reindex_pdf(document_id: int, file: UploadFile = File(...)):
+    """Replace PDF chunks in one DB transaction, preserving document ID.
+
+    Development-only: authenticate before public deployment.
+    """
+    try:
+        data = file.file.read(MAX_FILE_BYTES + 1)
+        title = file.filename or ""
+        pages = extract_pdf_pages(title, data)
+        doc_id, count, exists = ingest_pdf_pages(title, pages, replace_document_id=document_id)
+        return IngestResponse(document_id=doc_id, chunk_count=count, already_exists=exists)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:

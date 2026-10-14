@@ -45,3 +45,29 @@ def extract_document(filename: str, data: bytes) -> tuple[str, str]:
     if len(text.strip()) < 20:
         raise ValueError("No readable text found (scanned PDFs require OCR)")
     return name, text
+
+
+def extract_pdf_pages(filename: str, data: bytes) -> list[tuple[int, str]]:
+    """Extract text with 1-based physical PDF page numbers."""
+    name = Path(filename.replace("\\", "/")).name
+    if Path(name).suffix.lower() != ".pdf":
+        raise ValueError("Only PDF files support page-aware extraction")
+    if not data or len(data) > MAX_FILE_BYTES:
+        raise ValueError("PDF is empty or exceeds upload size limit")
+    try:
+        reader = PdfReader(BytesIO(data), strict=False)
+        if reader.is_encrypted:
+            raise ValueError("Encrypted PDFs are not supported")
+        if len(reader.pages) > MAX_PDF_PAGES:
+            raise ValueError(f"PDF exceeds the {MAX_PDF_PAGES}-page limit")
+        pages = [(i, page.extract_text() or "")
+                 for i, page in enumerate(reader.pages, start=1)]
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("Could not read PDF content") from exc
+    if sum(len(text) for _, text in pages) > MAX_TEXT_CHARS:
+        raise ValueError(f"Extracted text exceeds the {MAX_TEXT_CHARS}-character limit")
+    if sum(len(text.strip()) for _, text in pages) < 20:
+        raise ValueError("No readable text found (scanned PDFs require OCR)")
+    return pages

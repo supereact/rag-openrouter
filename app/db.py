@@ -46,6 +46,9 @@ def init_database() -> None:
             )
         """)
         conn.execute("""
+            ALTER TABLE chunks ADD COLUMN IF NOT EXISTS page_number INTEGER
+        """)
+        conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_chunks_document_id
             ON chunks (document_id)
         """)
