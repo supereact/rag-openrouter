@@ -5,8 +5,8 @@ from pathlib import Path
 from pypdf import PdfReader
 
 MAX_FILE_BYTES = 10 * 1024 * 1024
-MAX_TEXT_CHARS = 200_000
-MAX_PDF_PAGES = 100
+MAX_TEXT_CHARS = 1_000_000
+MAX_PDF_PAGES = 300
 ALLOWED_EXTENSIONS = {".txt", ".md", ".pdf"}
 
 
