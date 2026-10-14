@@ -1,0 +1,3 @@
+Security incident reporting (DEMO DOCUMENT; not a real company policy).
+
+Report suspected phishing, credential theft, malicious sign-in attempts, ransomware indicators or sensitive-data exposure immediately to the security operations team via the designated incident channel. Include the approximate time, the affected system, observable symptoms and incident ticket number when available. Do not upload credentials, secrets or sensitive personal data to unapproved tools. The security team will classify severity and coordinate containment steps.

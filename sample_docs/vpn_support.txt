@@ -1,0 +1,5 @@
+VPN troubleshooting runbook (DEMO DOCUMENT; not a real company policy).
+
+If a staff member cannot connect to the corporate VPN, first confirm that a regular internet connection is working. Then check the VPN client version and confirm the device's time is correct. Verify the user's multi-factor authentication method is available and that the account is not locked. If the error is "authentication denied", ask the user to validate their identity through the approved identity help desk. Do not request passwords or MFA codes in chat.
+
+If the user can connect but cannot reach internal services, check DNS resolution and the assigned VPN network routes. The network operations team can review VPN gateway health and associated firewall rules. Escalate incidents affecting multiple employees to the on-call network engineer.

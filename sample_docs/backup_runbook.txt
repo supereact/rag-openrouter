@@ -1,0 +1,3 @@
+Database backup and recovery guide (DEMO DOCUMENT; not a real company policy).
+
+The PostgreSQL team takes an encrypted database backup every night at 02:00 local time. Backups are stored in a restricted, versioned object-storage bucket. A sample database restore is tested once per month in a separate environment, never against live production data. If a database restoration is required, open a priority ticket with the database on-call engineer and seek incident commander approval before production changes.
