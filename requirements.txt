@@ -17,3 +17,7 @@ openai>=1.50,<3
 # Configuration and tests
 python-dotenv>=1.0,<2
 pytest>=8,<10
+
+# Document upload and PDF extraction
+python-multipart>=0.0.20,<1.0
+pypdf>=5.0,<7.0

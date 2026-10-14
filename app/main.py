@@ -1,8 +1,9 @@
 """Local FastAPI application. For learning only; no authentication is installed."""
 import psycopg
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, File, UploadFile
 
 from app.db import db_connection
+from app.file_ingestion import MAX_FILE_BYTES, extract_document
 from app.schemas import (
     AskResponse, IngestRequest, IngestResponse, SearchRequest, SearchResponse
 )
@@ -51,3 +52,22 @@ def ask(body: SearchRequest):
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return AskResponse(question=body.question, answer=answer, sources=hits)
+
+
+@app.post("/documents/upload", response_model=IngestResponse)
+def upload_document(file: UploadFile = File(...)):
+    """Upload a document into the existing RAG pipeline (local MVP only)."""
+    try:
+        # Read at most limit + 1 so oversized files can be rejected.
+        data = file.file.read(MAX_FILE_BYTES + 1)
+        title, text = extract_document(file.filename or "", data)
+        doc_id, count, exists = ingest_document(title, text)
+        return IngestResponse(
+            document_id=doc_id,
+            chunk_count=count,
+            already_exists=exists,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        file.file.close()
