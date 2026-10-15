@@ -7,6 +7,7 @@ import argparse
 from pathlib import Path
 from app.db import db_connection
 from app.services import ingest_document
+from app.security import local_admin_principal
 
 SAMPLES = Path(__file__).resolve().parents[1] / 'sample_docs'
 
@@ -17,6 +18,7 @@ def main():
     args = parser.parse_args()
     if not args.confirm:
         parser.error('Pass --confirm to replace bundled demo documents')
+    principal = local_admin_principal()
     files = sorted(SAMPLES.glob('*.txt'))
     if not files:
         raise RuntimeError('No bundled .txt demo documents found')
@@ -29,10 +31,12 @@ def main():
         if 'DEMO DOCUMENT' not in text:
             raise RuntimeError(f'Refusing to replace non-demo file: {file}')
         with db_connection() as conn:
-            conn.execute('DELETE FROM documents WHERE title = %s AND EXISTS '
+            conn.execute('DELETE FROM documents WHERE tenant_id=%s '
+                         'AND owner_user_id=%s AND title=%s AND EXISTS '
                          '(SELECT 1 FROM chunks WHERE document_id = documents.id '
-                         'AND content LIKE %s)', (title, '%DEMO DOCUMENT%'))
-        doc_id, count, existed = ingest_document(title, text)
+                         'AND content LIKE %s)',
+                         (principal.tenant_id, principal.user_id, title, '%DEMO DOCUMENT%'))
+        doc_id, count, existed = ingest_document(title, text, principal)
         print(f'{title}: id={doc_id}, chunks={count}, existed={existed}')
 
 

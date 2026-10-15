@@ -6,6 +6,14 @@ from fastapi.testclient import TestClient
 from pypdf import PdfWriter
 
 from app import main
+from app.security import Principal, require_editor
+
+
+@pytest.fixture
+def authenticated_editor():
+    main.app.dependency_overrides[require_editor] = lambda: Principal(3, 1, "editor", "editor")
+    yield
+    main.app.dependency_overrides.clear()
 from app.file_ingestion import MAX_FILE_BYTES, extract_document
 
 
@@ -46,10 +54,10 @@ def test_invalid_uploads(filename, data):
         extract_document(filename, data)
 
 
-def test_upload_calls_existing_ingestion(monkeypatch):
+def test_upload_calls_existing_ingestion(monkeypatch, authenticated_editor):
     seen = {}
 
-    def fake_ingest(title, text):
+    def fake_ingest(title, text, principal):
         seen["title"] = title
         seen["text"] = text
         return 42, 2, False
@@ -69,10 +77,20 @@ def test_upload_calls_existing_ingestion(monkeypatch):
     assert seen["title"] == "support.md"
 
 
-def test_upload_rejects_bad_extension():
+def test_upload_rejects_bad_extension(authenticated_editor):
     client = TestClient(main.app)
     response = client.post(
         "/documents/upload",
         files={"file": ("script.exe", b"Do not run this program at all.")},
     )
     assert response.status_code == 400
+
+
+def test_upload_limit_is_50_mb():
+    assert MAX_FILE_BYTES == 50 * 1024 * 1024
+
+
+def test_empty_pdf_has_specific_error():
+    from app.file_ingestion import extract_pdf_pages
+    with pytest.raises(ValueError, match="uploaded PDF is empty"):
+        extract_pdf_pages("test.pdf", b"")

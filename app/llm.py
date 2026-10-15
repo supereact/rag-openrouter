@@ -5,6 +5,7 @@ Direct OpenAI uses the Responses API. No confidential data should be sent
 until provider contracts, retention, and document permissions are reviewed.
 """
 from app import settings
+from app.observability import capture_llm_usage
 
 INSTRUCTIONS = (
     "You are a company knowledge assistant. Answer using only the supplied "
@@ -36,6 +37,12 @@ def generate_grounded_answer(question: str, context: str) -> str:
                 {"role": "user", "content": f"Question:\n{question}\n\nSource excerpts:\n{context}"},
             ],
         )
+        # OpenRouter may include cost in its usage payload; the OpenAI SDK
+        # can preserve provider-specific fields in the model's extra data.
+        usage = getattr(completion, "usage", None)
+        if hasattr(completion, "model_dump"):
+            usage = completion.model_dump().get("usage", usage)
+        capture_llm_usage(usage, provider="openrouter")
         answer = completion.choices[0].message.content if completion.choices else None
         if not answer:
             raise RuntimeError("OpenRouter returned no textual answer for this request")
@@ -55,6 +62,7 @@ def generate_grounded_answer(question: str, context: str) -> str:
             input=f"Question:\n{question}\n\nSource excerpts:\n{context}",
             store=False,
         )
+        capture_llm_usage(getattr(response, "usage", None), provider="openai")
         if not response.output_text:
             raise RuntimeError("OpenAI returned no textual answer for this request")
         return response.output_text

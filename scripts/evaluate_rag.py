@@ -83,10 +83,12 @@ def main() -> int:
 
     # Imports are deliberately lazy: importing metrics never loads PyTorch.
     from app.services import answer_question, search_documents
+    from app.security import local_admin_principal
+    principal = local_admin_principal()
 
     # The CLI overrides the API's RAG_RETRIEVAL_MODE only for this process.
     def selected_search(question: str, top_k: int):
-        return search_documents(question, top_k, mode=args.retriever)
+        return search_documents(question, top_k, mode=args.retriever, principal=principal)
 
     try:
         if args.warmup:

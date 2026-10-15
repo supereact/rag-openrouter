@@ -4,9 +4,8 @@ from pathlib import Path
 
 from pypdf import PdfReader
 
-MAX_FILE_BYTES = 10 * 1024 * 1024
-MAX_TEXT_CHARS = 1_000_000
-MAX_PDF_PAGES = 300
+MAX_FILE_BYTES = 50 * 1024 * 1024
+MAX_PDF_PAGES = 100
 ALLOWED_EXTENSIONS = {".txt", ".md", ".pdf"}
 
 
@@ -20,7 +19,7 @@ def extract_document(filename: str, data: bytes) -> tuple[str, str]:
     if not data:
         raise ValueError("The uploaded file is empty")
     if len(data) > MAX_FILE_BYTES:
-        raise ValueError("File exceeds the 10 MB upload limit")
+        raise ValueError(f"File exceeds the {MAX_FILE_BYTES // (1024 * 1024)} MB upload limit")
 
     if extension == ".pdf":
         try:
@@ -40,8 +39,6 @@ def extract_document(filename: str, data: bytes) -> tuple[str, str]:
         except UnicodeDecodeError as exc:
             raise ValueError("Text and Markdown files must be UTF-8") from exc
 
-    if len(text) > MAX_TEXT_CHARS:
-        raise ValueError("Extracted text exceeds the 200,000-character limit")
     if len(text.strip()) < 20:
         raise ValueError("No readable text found (scanned PDFs require OCR)")
     return name, text
@@ -52,8 +49,10 @@ def extract_pdf_pages(filename: str, data: bytes) -> list[tuple[int, str]]:
     name = Path(filename.replace("\\", "/")).name
     if Path(name).suffix.lower() != ".pdf":
         raise ValueError("Only PDF files support page-aware extraction")
-    if not data or len(data) > MAX_FILE_BYTES:
-        raise ValueError("PDF is empty or exceeds upload size limit")
+    if not data:
+        raise ValueError("The uploaded PDF is empty")
+    if len(data) > MAX_FILE_BYTES:
+        raise ValueError(f"PDF exceeds the {MAX_FILE_BYTES // (1024 * 1024)} MB upload limit")
     try:
         reader = PdfReader(BytesIO(data), strict=False)
         if reader.is_encrypted:
@@ -66,8 +65,6 @@ def extract_pdf_pages(filename: str, data: bytes) -> list[tuple[int, str]]:
         raise
     except Exception as exc:
         raise ValueError("Could not read PDF content") from exc
-    if sum(len(text) for _, text in pages) > MAX_TEXT_CHARS:
-        raise ValueError(f"Extracted text exceeds the {MAX_TEXT_CHARS}-character limit")
     if sum(len(text.strip()) for _, text in pages) < 20:
         raise ValueError("No readable text found (scanned PDFs require OCR)")
     return pages
