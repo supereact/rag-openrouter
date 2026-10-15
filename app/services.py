@@ -1,11 +1,14 @@
 """Document ingestion, semantic search, and optional grounded answer generation."""
 import hashlib
+import os
+from functools import lru_cache
 
 from app.chunking import chunk_text
 from app.db import db_connection
 from app.embeddings import embed_many
 from app.schemas import SearchHit
 from app.llm import generate_grounded_answer
+from app.retrieval import Candidate, reciprocal_rank_fusion, row_to_candidate, rerank_candidates
 
 
 def ingest_document(title: str, text: str) -> tuple[int, int, bool]:
@@ -99,31 +102,97 @@ def ingest_pdf_pages(title: str, pages: list[tuple[int, str]],
     return doc_id, len(numbered_parts), False
 
 
-def search_documents(question: str, top_k: int = 3) -> list[SearchHit]:
+# Exact vector search is retained as the default (existing API behavior).
+# Set RAG_RETRIEVAL_MODE=hybrid or =rerank in .env to opt in.
+RETRIEVAL_MODES = {"vector", "hybrid", "rerank"}
+RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+
+@lru_cache(maxsize=1)
+def _get_reranker():
+    # Import and download weights only when reranking is explicitly requested.
+    from sentence_transformers import CrossEncoder
+    return CrossEncoder(RERANKER_MODEL)
+
+
+def _cross_encoder_rerank(question: str, candidates: list[Candidate]) -> list[Candidate]:
+    if not candidates:
+        return []
+    model = _get_reranker()
+    pairs = [(question, hit.content) for hit in candidates]
+    scores = model.predict(pairs, show_progress_bar=False)
+    return rerank_candidates(question, candidates, [float(score) for score in scores])
+
+
+def search_documents(
+    question: str, top_k: int = 3, mode: str | None = None
+) -> list[SearchHit]:
+    """Retrieve chunks using vector, hybrid (RRF), or hybrid + reranking.
+
+    All returned `similarity` values remain cosine similarity; rank fusion and
+    cross-encoder scores are only used for ORDERING, never mislabeled as cosine.
+    """
+    selected_mode = (mode or os.getenv("RAG_RETRIEVAL_MODE", "vector")).strip().lower()
+    if selected_mode not in RETRIEVAL_MODES:
+        raise ValueError(f"Unknown retrieval mode: {selected_mode}")
+    if not 1 <= top_k <= 10:
+        raise ValueError("top_k must be between 1 and 10")
+
+    # Candidate pool is deliberately larger than the final top_k so that
+    # lexical search can rescue vectors ranked outside top 5.
+    pool_size = max(40, top_k * 5) if selected_mode != "vector" else top_k
     embedding = embed_many([question])[0]
+    select_columns = """c.id, d.id, d.title, c.chunk_index, c.content,
+                        c.page_number, 1 - (c.embedding <=> %s) AS similarity"""
+
     with db_connection() as conn:
-        rows = conn.execute(
-            """
-            SELECT d.id, d.title, c.chunk_index, c.content, c.page_number,
-                   1 - (c.embedding <=> %s) AS similarity
-            FROM chunks AS c
-            JOIN documents AS d ON d.id = c.document_id
-            ORDER BY c.embedding <=> %s
-            LIMIT %s
-            """,
-            (embedding, embedding, top_k),
+        vector_rows = conn.execute(
+            f"""SELECT {select_columns}
+                FROM chunks c
+                JOIN documents d ON d.id = c.document_id
+                ORDER BY c.embedding <=> %s
+                LIMIT %s""",
+            (embedding, embedding, pool_size),
         ).fetchall()
+
+        vector_candidates = [row_to_candidate(row) for row in vector_rows]
+        if selected_mode == "vector":
+            ordered = vector_candidates
+        else:
+            # websearch_to_tsquery handles ordinary phrases and punctuation
+            # without requiring the caller to write tsquery syntax.
+            keyword_rows = conn.execute(
+                f"""WITH q AS (
+                        SELECT websearch_to_tsquery('english', %s) AS tsq
+                    )
+                    SELECT {select_columns}
+                    FROM chunks c
+                    JOIN documents d ON d.id = c.document_id
+                    CROSS JOIN q
+                    WHERE to_tsvector('english', c.content) @@ q.tsq
+                    ORDER BY ts_rank_cd(to_tsvector('english', c.content), q.tsq)
+                             DESC, c.id
+                    LIMIT %s""",
+                (question, embedding, pool_size),
+            ).fetchall()
+            keyword_candidates = [row_to_candidate(row) for row in keyword_rows]
+            ordered = reciprocal_rank_fusion(vector_candidates, keyword_candidates)
+
+    # IMPORTANT: inference runs after leaving the DB transaction/connection.
+    if selected_mode == "rerank":
+        ordered = _cross_encoder_rerank(question, ordered[:pool_size])
+
     return [
         SearchHit(
             source_number=i,
-            document_id=int(row[0]),
-            title=row[1],
-            chunk_index=int(row[2]),
-            content=row[3],
-            similarity=float(row[5]),
-            page_number=row[4],
+            document_id=hit.document_id,
+            title=hit.title,
+            chunk_index=hit.chunk_index,
+            content=hit.content,
+            similarity=hit.similarity,
+            page_number=hit.page_number,
         )
-        for i, row in enumerate(rows, start=1)
+        for i, hit in enumerate(ordered[:top_k], start=1)
     ]
 
 

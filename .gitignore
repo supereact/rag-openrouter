@@ -4,4 +4,11 @@ __pycache__/
 .pytest_cache/
 *.pyc
 .DS_Store
-backups/
+
+# Local RAG evaluation reports
+evaluation/results*.json
+evaluation/answers*.json
+evaluation/baseline*.json
+
+# Hybrid-search evaluation outputs
+evaluation/*-warm.json

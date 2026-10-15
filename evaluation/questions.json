@@ -1,0 +1,58 @@
+[
+  {
+    "id": "vpn-basic",
+    "question": "What should an employee check if the company VPN will not connect?",
+    "expected_title": "Vpn Support",
+    "evidence_contains": "regular internet connection",
+    "expected_answer_terms": ["internet", "VPN", "MFA"]
+  },
+  {
+    "id": "vpn-internal-dns",
+    "question": "The VPN connects, but internal company services are unavailable. What should I investigate?",
+    "expected_title": "Vpn Support",
+    "evidence_contains": "DNS resolution",
+    "expected_answer_terms": ["DNS", "routes"]
+  },
+  {
+    "id": "password-reset",
+    "question": "What should support do when an employee cannot recover a locked account?",
+    "expected_title": "Password Policy",
+    "evidence_contains": "identity support team",
+    "expected_answer_terms": ["identity", "verify"]
+  },
+  {
+    "id": "security-phishing",
+    "question": "Where should staff report a suspected phishing or credential theft incident?",
+    "expected_title": "Security Response",
+    "evidence_contains": "security operations team",
+    "expected_answer_terms": ["security", "report"]
+  },
+  {
+    "id": "backup-schedule",
+    "question": "When are PostgreSQL backups taken, and where are they stored?",
+    "expected_title": "Backup Runbook",
+    "evidence_contains": "every night at 02:00",
+    "expected_answer_terms": ["02:00", "bucket"]
+  },
+  {
+    "id": "backup-restoration",
+    "question": "What approval is required before a production database restoration?",
+    "expected_title": "Backup Runbook",
+    "evidence_contains": "incident commander approval",
+    "expected_answer_terms": ["incident commander", "approval"]
+  },
+  {
+    "id": "nist-phases",
+    "question": "According to the NIST incident handling guide, what are the main phases of incident response?",
+    "expected_title": "incident-response.pdf",
+    "evidence_contains": "post-incident activity",
+    "expected_answer_terms": ["preparation", "detection and analysis", "containment", "post-incident"]
+  },
+  {
+    "id": "nist-policy",
+    "question": "What does NIST discuss in the incident response policy elements section?",
+    "expected_title": "incident-response.pdf",
+    "evidence_contains": "Policy governing incident response",
+    "expected_answer_terms": ["policy", "incident response"]
+  }
+]

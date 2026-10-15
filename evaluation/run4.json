@@ -1,0 +1,112 @@
+{
+  "created_utc": "2026-10-15T04:57:31.312024+00:00",
+  "top_k": 5,
+  "answer_generation_enabled": false,
+  "summary": {
+    "cases": 8,
+    "document_recall_at_k": 1,
+    "evidence_recall_at_k": 0.875,
+    "evidence_mrr_at_k": 0.6875,
+    "retrieval_p50_ms": 28.01,
+    "retrieval_p95_ms": 7768.96
+  },
+  "results": [
+    {
+      "id": "vpn-basic",
+      "document_hit": true,
+      "evidence_hit": true,
+      "evidence_reciprocal_rank": 0.25,
+      "first_evidence_rank": 4,
+      "retrieval_ms": 7768.96,
+      "retrieved_titles": [
+        "Vpn Support",
+        "vpn_support.txt",
+        "incident-response.pdf"
+      ]
+    },
+    {
+      "id": "vpn-internal-dns",
+      "document_hit": true,
+      "evidence_hit": true,
+      "evidence_reciprocal_rank": 0.25,
+      "first_evidence_rank": 4,
+      "retrieval_ms": 33.92,
+      "retrieved_titles": [
+        "Vpn Support",
+        "vpn_support.txt",
+        "incident-response.pdf"
+      ]
+    },
+    {
+      "id": "password-reset",
+      "document_hit": true,
+      "evidence_hit": true,
+      "evidence_reciprocal_rank": 1.0,
+      "first_evidence_rank": 1,
+      "retrieval_ms": 31.9,
+      "retrieved_titles": [
+        "Password Policy",
+        "incident-response.pdf",
+        "Vpn Support"
+      ]
+    },
+    {
+      "id": "security-phishing",
+      "document_hit": true,
+      "evidence_hit": true,
+      "evidence_reciprocal_rank": 1.0,
+      "first_evidence_rank": 1,
+      "retrieval_ms": 28.01,
+      "retrieved_titles": [
+        "Security Response",
+        "incident-response.pdf"
+      ]
+    },
+    {
+      "id": "backup-schedule",
+      "document_hit": true,
+      "evidence_hit": true,
+      "evidence_reciprocal_rank": 1.0,
+      "first_evidence_rank": 1,
+      "retrieval_ms": 29.42,
+      "retrieved_titles": [
+        "Backup Runbook",
+        "incident-response.pdf"
+      ]
+    },
+    {
+      "id": "backup-restoration",
+      "document_hit": true,
+      "evidence_hit": true,
+      "evidence_reciprocal_rank": 1.0,
+      "first_evidence_rank": 1,
+      "retrieval_ms": 24.29,
+      "retrieved_titles": [
+        "Backup Runbook",
+        "incident-response.pdf"
+      ]
+    },
+    {
+      "id": "nist-phases",
+      "document_hit": true,
+      "evidence_hit": false,
+      "evidence_reciprocal_rank": 0.0,
+      "first_evidence_rank": null,
+      "retrieval_ms": 22.81,
+      "retrieved_titles": [
+        "incident-response.pdf"
+      ]
+    },
+    {
+      "id": "nist-policy",
+      "document_hit": true,
+      "evidence_hit": true,
+      "evidence_reciprocal_rank": 1.0,
+      "first_evidence_rank": 1,
+      "retrieval_ms": 24.24,
+      "retrieved_titles": [
+        "incident-response.pdf"
+      ]
+    }
+  ]
+}
