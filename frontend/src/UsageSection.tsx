@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { BarChart3, RefreshCw } from 'lucide-react'
-import { ApiError, api } from './api'
+import { api } from './api'
 import type { AdminUsage, UsageUser } from './types'
+import { useAdminResource } from './useAdminResource'
 
 function fmtCredits(value: string): string {
   const number = Number(value)
@@ -48,22 +49,10 @@ function UsageGraph({ data }: { data: AdminUsage['daily'] }) {
 }
 
 export function UsageSection({ apiKey, onUnauthorized }: {apiKey: string; onUnauthorized: () => void}) {
-  const [data, setData] = useState<AdminUsage | null>(null)
   const [days, setDays] = useState<7 | 30>(30)
   const [sort, setSort] = useState<'overall' | 'week'>('overall')
-  const [error, setError] = useState('')
-  const [loading, setLoading] = useState(true)
-
-  const reload = useCallback(async () => {
-    setLoading(true); setError('')
-    try { setData(await api.adminUsage(apiKey, days)) }
-    catch (err) {
-      if (err instanceof ApiError && err.status === 401) onUnauthorized()
-      setError(err instanceof Error ? err.message : 'Could not load usage')
-    } finally { setLoading(false) }
-  }, [apiKey, days, onUnauthorized])
-
-  useEffect(() => { void reload() }, [reload])
+  const loader = useCallback(() => api.adminUsage(apiKey, days), [apiKey, days])
+  const { data, error, loading, stale, updatedAt, refresh } = useAdminResource(loader, onUnauthorized)
 
   const users = useMemo(() => [...(data?.users ?? [])].sort((a: UsageUser, b: UsageUser) =>
     Number(sort === 'overall' ? b.overall_credits : b.week_credits) -
@@ -73,27 +62,28 @@ export function UsageSection({ apiKey, onUnauthorized }: {apiKey: string; onUnau
   return <section className="space-y-4" aria-label="OpenRouter usage">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <div className="flex gap-2 items-center"><BarChart3 size={20} className="text-indigo-600"/><h2 className="text-lg font-semibold">OpenRouter Usage</h2></div>
-      <button type="button" aria-label="Refresh usage" onClick={() => void reload()} className="border border-slate-300 rounded-lg px-3 py-2 text-sm flex gap-1 items-center">
+      <button type="button" disabled={loading} aria-label="Refresh usage" onClick={() => void refresh()} className="border border-slate-300 rounded-lg px-3 py-2 text-sm flex gap-1 items-center">
         <RefreshCw size={15}/> Refresh usage
       </button>
     </div>
-    {loading && <p role="status" className="text-sm text-slate-500">Loading usage…</p>}
-    {error && <p role="alert" className="notice-error">{error}</p>}
-    {data && <>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <TotalCard title="Overall OpenRouter usage" value={data.overall_credits} subtitle="Total reported credits since usage tracking began" />
-        <TotalCard title="This week" value={data.week_credits} subtitle={`Week starts Monday ${data.week_starts_utc} (UTC)`} />
-      </div>
-      <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
-        <div className="flex flex-wrap justify-between gap-2 items-center">
-          <h3 className="font-semibold">Total OpenRouter usage by day</h3>
-          <div className="flex gap-2" role="group" aria-label="Usage chart range">
-            <button type="button" aria-pressed={days === 7} onClick={() => setDays(7)} className={`text-sm rounded-lg px-3 py-1.5 ${days === 7 ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700'}`}>7 days</button>
-            <button type="button" aria-pressed={days === 30} onClick={() => setDays(30)} className={`text-sm rounded-lg px-3 py-1.5 ${days === 30 ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700'}`}>30 days</button>
-          </div>
+    {loading && <p role="status" className="text-sm text-slate-500">{data ? 'Refreshing usage…' : 'Loading usage…'}</p>}
+    {error && <p role="alert" className="notice-error">{error}{stale && ' Previously loaded usage may be out of date.'}</p>}
+    {updatedAt && <p className="text-xs text-slate-500">Usage last updated: {updatedAt.toLocaleTimeString()}</p>}
+    {data && <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <TotalCard title="Overall OpenRouter usage" value={data.overall_credits} subtitle="Total reported credits since usage tracking began" />
+      <TotalCard title="This week" value={data.week_credits} subtitle={`Week starts Monday ${data.week_starts_utc} (UTC)`} />
+    </div>}
+    <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
+      <div className="flex flex-wrap justify-between gap-2 items-center">
+        <h3 className="font-semibold">Total OpenRouter usage by day</h3>
+        <div className="flex gap-2" role="group" aria-label="Usage chart range">
+          <button type="button" aria-pressed={days === 7} onClick={() => setDays(7)} className={`text-sm rounded-lg px-3 py-1.5 ${days === 7 ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700'}`}>7 days</button>
+          <button type="button" aria-pressed={days === 30} onClick={() => setDays(30)} className={`text-sm rounded-lg px-3 py-1.5 ${days === 30 ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700'}`}>30 days</button>
         </div>
-        <UsageGraph data={data.daily}/>
       </div>
+      {data && <UsageGraph data={data.daily}/>}
+    </div>
+    {data && <>
       <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
         <div className="flex flex-wrap justify-between gap-2 items-center"><h3 className="font-semibold">Usage by user</h3>
           <label className="text-sm text-slate-600">Sort by <select aria-label="Sort usage" value={sort} onChange={e => setSort(e.target.value as 'overall'|'week')} className="border border-slate-300 rounded-md p-1.5 ml-2">

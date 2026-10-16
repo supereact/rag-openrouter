@@ -1,13 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import App from './App'
 import { api } from './api'
+import { navigate } from './navigation'
 
 vi.mock('./api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api')>()
   return {
     ...actual,
     api: {
+      library: vi.fn(), removeJob: vi.fn(), documentAccess: vi.fn(), updateDocumentAccess: vi.fn(),
       me: vi.fn(), ask: vi.fn(), documents: vi.fn(), upload: vi.fn(),
       conversationFeedback: vi.fn(), setAnswerFeedback: vi.fn(), deleteAnswerFeedback: vi.fn(), adminFeedback: vi.fn(),
       conversations: vi.fn(), conversation: vi.fn(), createConversation: vi.fn(),
@@ -41,14 +43,16 @@ async function login() {
   fireEvent.click(screen.getByRole('button', {name:'API key'}))
   fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'rag_dummy_key' } })
   fireEvent.click(screen.getByRole('button', { name: /connect to workspace/i }))
-  await screen.findByRole('heading', { name: 'Knowledge Assistant' })
+  await screen.findByRole('navigation', { name: 'Main navigation' })
 }
 
 beforeEach(() => {
   vi.clearAllMocks()
+  window.history.replaceState({}, "", "/")
   vi.stubGlobal('localStorage', storage)
   vi.mocked(api.me).mockResolvedValue(account)
   vi.mocked(api.documents).mockResolvedValue([])
+  vi.mocked(api.library).mockResolvedValue({items: [], total: 0, page: 1, page_size: 20, pages: 1})
   vi.mocked(api.knowledgeBases).mockResolvedValue([])
   vi.mocked(api.knowledgeBaseDocuments).mockResolvedValue([])
   vi.mocked(api.jobs).mockResolvedValue([])
@@ -87,6 +91,77 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+describe('URL navigation', () => {
+  it('preserves a document deep link and filters through sign-in and refresh', async () => {
+    const destination = '/documents?q=policy&status=failed&file_type=pdf&page=2&page_size=50'
+    window.history.replaceState({}, '', destination)
+    const view = render(<App/>)
+    await waitFor(() => expect(window.location.pathname).toBe('/login'))
+    expect(new URLSearchParams(window.location.search).get('returnTo')).toBe(destination)
+    vi.mocked(api.library).mockResolvedValue({items: [], total: 51, page: 2, page_size: 50, pages: 2})
+    await login()
+    await screen.findByRole('heading', {name:'Documents'})
+    expect(window.location.pathname + window.location.search).toBe(destination)
+    expect(screen.getByLabelText('Filter documents')).toHaveValue('policy')
+    expect(screen.getByLabelText('Document status')).toHaveValue('failed')
+    expect(screen.getByLabelText('File type')).toHaveValue('pdf')
+    expect(api.library).toHaveBeenCalledWith('rag_dummy_key', new URLSearchParams('page=2&page_size=50&q=policy&status=failed&file_type=pdf'))
+    view.unmount()
+    render(<App/>)
+    await screen.findByRole('button', {name:'API key'})
+    expect(new URLSearchParams(window.location.search).get('returnTo')).toBe(destination)
+    expect(storage.setItem).not.toHaveBeenCalled()
+  })
+
+  it('supports real links, Back/Forward, active highlighting and mobile closure', async () => {
+    render(<App/>); await login()
+    expect(window.location.pathname).toBe('/assistant')
+    fireEvent.click(screen.getByLabelText('Open navigation'))
+    expect(screen.getByLabelText('Close navigation')).toBeInTheDocument()
+    const link = screen.getByRole('link', {name:'Documents'})
+    expect(link).toHaveAttribute('href', '/documents')
+    fireEvent.click(link)
+    await screen.findByRole('heading', {name:'Documents'})
+    expect(link).toHaveAttribute('aria-current', 'page')
+    expect(screen.queryByLabelText('Close navigation')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Open navigation'))
+    fireEvent.click(link)
+    expect(screen.queryByLabelText('Close navigation')).not.toBeInTheDocument()
+    act(() => window.history.back())
+    await waitFor(() => expect(window.location.pathname).toBe('/assistant'))
+    await screen.findByRole('heading', {name:'Knowledge Assistant'})
+    act(() => window.history.forward())
+    await screen.findByRole('heading', {name:'Documents'})
+  })
+
+  it.each(['/dashboard', '/users'])('guards direct non-admin navigation to %s', async path => {
+    window.history.replaceState({}, '', path)
+    render(<App/>); await login()
+    await screen.findByRole('heading', {name:'Access denied'})
+    expect(screen.queryByRole('link', {name:'Dashboard'})).not.toBeInTheDocument()
+    expect(api.adminDashboard).not.toHaveBeenCalled()
+    expect(api.adminUsers).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('link', {name:'Assistant'}))
+    act(() => navigate('/users'))
+    expect(screen.getByRole('heading', {name:'Access denied'})).toBeInTheDocument()
+  })
+
+  it.each(['https://outside.example/documents', '//outside.example/users', '/documents-evil', '/login', '/documents/11'])('rejects unsafe return destination %s', async destination => {
+    window.history.replaceState({}, '', `/login?${new URLSearchParams({returnTo:destination})}`)
+    render(<App/>); await login()
+    expect(window.location.pathname).toBe('/assistant')
+  })
+
+  it('shows unknown routes without granting access or redirecting externally', async () => {
+    window.history.replaceState({}, '', '/missing')
+    render(<App/>)
+    expect(screen.getByRole('heading', {name:'Page not found'})).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('link', {name:'Sign in'})); await login()
+    act(() => navigate('/another-missing'))
+    expect(screen.getByRole('heading', {name:'Page not found'})).toBeInTheDocument()
+  })
+})
+
 describe('Milestone 8 UI', () => {
   it('supports email/password sign-in without saving session in storage', async () => {
     vi.mocked(api.loginPassword).mockResolvedValue({access_token:'rags_example_session',token_type:'bearer',expires_in:43200})
@@ -121,9 +196,9 @@ describe('Milestone 8 UI', () => {
     vi.mocked(api.me).mockResolvedValue({...account,role:'admin'})
     render(<App />)
     await login()
-    fireEvent.click(screen.getByRole('button',{name:'Dashboard'}))
+    fireEvent.click(screen.getByRole('link', {name:'Dashboard'}))
     expect(await screen.findByRole('heading',{name:'Admin Dashboard'})).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button',{name:'User Management'}))
+    fireEvent.click(screen.getByRole('link', {name:'User Management'}))
     expect(await screen.findByRole('heading',{name:'User Management'})).toBeInTheDocument()
   })
 
@@ -153,17 +228,18 @@ describe('Milestone 8 UI', () => {
     await screen.findByText(/Preparation/)
     expect(screen.getByText(/PDF page 31/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', {name:'Jump to source 1'}))
-    fireEvent.click(screen.getByRole('button', {name:/incident-response.pdf/i}))
+    fireEvent.click(screen.getByRole('button', {name:/incident-response.pdf/i, expanded: false}))
     expect(screen.getByText('Preparation guidance')).toBeInTheDocument()
   })
 
   it('hides upload and delete actions for readers', async () => {
-    vi.mocked(api.documents).mockResolvedValue([{
-      id:11, title:'incident-response.pdf', owner_user_id:1, created_at:'2026-10-15T00:00:00Z',
-    }])
+    vi.mocked(api.library).mockResolvedValue({items:[{
+      kind:'document', id:'11', title:'incident-response.pdf', owner_user_id:1, created_at:'2026-10-15T00:00:00Z',
+      status:'indexed', can_manage:false, assigned_users:null, error:null,
+    }], total:1, page:1, page_size:20, pages:1})
     render(<App />)
     await login()
-    fireEvent.click(screen.getByRole('button', {name:'Documents'}))
+    fireEvent.click(screen.getByRole('link', {name:'Documents'}))
     await screen.findByText('incident-response.pdf')
     expect(screen.queryByText('Upload document')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Delete incident-response.pdf')).not.toBeInTheDocument()
@@ -173,22 +249,21 @@ describe('Milestone 8 UI', () => {
     vi.mocked(api.me).mockResolvedValue({...account, role:'editor'})
     render(<App />)
     await login()
-    fireEvent.click(screen.getByRole('button', {name:'Documents'}))
+    fireEvent.click(screen.getByRole('link', {name:'Documents'}))
     await waitFor(() => expect(screen.getByText('Upload document')).toBeInTheDocument())
     expect(screen.getByLabelText('Select document to upload')).toBeInTheDocument()
   })
 
   it('shows background job status to an editor', async () => {
     vi.mocked(api.me).mockResolvedValue({...account, role:'editor'})
-    vi.mocked(api.jobs).mockResolvedValue([{
-      id: '11111111-1111-4111-8111-111111111111', filename: 'guide.pdf', status: 'processing',
-      document_id: null, chunk_count: null, already_exists: null, error: null,
-      created_at: '2026-10-15T00:00:00Z', started_at: null, finished_at: null,
-    }])
+    vi.mocked(api.library).mockResolvedValue({items:[{
+      kind:'upload', id:'11111111-1111-4111-8111-111111111111', title:'guide.pdf', owner_user_id:2,
+      status:'processing', created_at:'2026-10-15T00:00:00Z', error:null, can_manage:true, assigned_users:null,
+    }], total:1, page:1, page_size:20, pages:1})
     render(<App />)
     await login()
-    fireEvent.click(screen.getByRole('button', { name: 'Documents' }))
-    expect(await screen.findByLabelText('Upload guide.pdf: processing')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('link', {name:'Documents'}))
+    expect(await screen.findByLabelText('guide.pdf: processing')).toBeInTheDocument()
   })
 
   it('preserves chat when navigating to Documents and back' , async () => {
@@ -204,8 +279,8 @@ describe('Milestone 8 UI', () => {
       element.classList.contains('rag-markdown') &&
       element.textContent?.trim() === 'Preparation [1].'
     await screen.findByText(answerMatches)
-    fireEvent.click(screen.getByRole('button', { name: 'Documents' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Assistant' }))
+    fireEvent.click(screen.getByRole('link', {name:'Documents'}))
+    fireEvent.click(screen.getByRole('link', {name:'Assistant'}))
     expect(screen.getByText(answerMatches)).toBeInTheDocument()
   })
 
@@ -353,7 +428,7 @@ describe('Milestone 10.5 feedback controls', () => {
     vi.mocked(api.me).mockResolvedValue({...account,role:'admin'})
     render(<App />)
     await login()
-    fireEvent.click(screen.getByRole('button',{name:'Dashboard'}))
+    fireEvent.click(screen.getByRole('link', {name:'Dashboard'}))
     expect(await screen.findByText('Answer Feedback & Quality Signals')).toBeInTheDocument()
     expect(api.adminFeedback).toHaveBeenCalled()
   })

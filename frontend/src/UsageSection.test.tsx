@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { UsageSection } from './UsageSection'
-import { api } from './api'
+import { api, ApiError } from './api'
 import type { AdminUsage } from './types'
 
 vi.mock('./api', async (importOriginal) => {
@@ -32,7 +32,7 @@ describe('OpenRouter admin usage dashboard', () => {
     vi.mocked(api.adminUsage).mockResolvedValue(usage)
     render(<UsageSection apiKey="secret" onUnauthorized={vi.fn()} />)
     await screen.findByText('Overall OpenRouter usage')
-    expect(screen.getByText('This week')).toBeInTheDocument()
+    expect(screen.getByText('This week', {selector: 'p'})).toBeInTheDocument()
     expect(screen.getByText('admin@example.com')).toBeInTheDocument()
     expect(screen.getByText('analyst')).toBeInTheDocument()
     expect(screen.getByText(/Cost coverage: 2 of 3/)).toBeInTheDocument()
@@ -46,5 +46,58 @@ describe('OpenRouter admin usage dashboard', () => {
     await screen.findByRole('img', { name: 'Daily OpenRouter usage credits graph' })
     fireEvent.click(screen.getByRole('button', {name:'7 days'}))
     await waitFor(() => expect(api.adminUsage).toHaveBeenCalledWith('secret',7))
+  })
+
+  it('clears the previous period and ignores a late response from an older period', async () => {
+    let finishSeven!: (value: AdminUsage) => void
+    vi.mocked(api.adminUsage).mockResolvedValue(usage)
+    render(<UsageSection apiKey="secret" onUnauthorized={vi.fn()}/>)
+    await screen.findByText('analyst')
+    vi.mocked(api.adminUsage).mockReturnValueOnce(new Promise(resolve => { finishSeven = resolve }))
+    fireEvent.click(screen.getByRole('button', {name: '7 days'}))
+    expect(screen.queryByText('analyst')).not.toBeInTheDocument()
+    expect(screen.queryByRole('img')).not.toBeInTheDocument()
+    expect(screen.getByText('Loading usage…')).toBeInTheDocument()
+    vi.mocked(api.adminUsage).mockResolvedValueOnce({...usage, users: []})
+    fireEvent.click(screen.getByRole('button', {name: '30 days'}))
+    await screen.findByRole('img')
+    await act(async () => { finishSeven({...usage, chart_days: 7}) })
+    expect(screen.getByRole('button', {name: '30 days'})).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByText('analyst')).not.toBeInTheDocument()
+  })
+
+  it('keeps data visible on a failed refresh and prevents duplicate clicks', async () => {
+    let fail!: (error: Error) => void
+    vi.mocked(api.adminUsage).mockResolvedValue(usage)
+    render(<UsageSection apiKey="secret" onUnauthorized={vi.fn()}/>)
+    await screen.findByText('analyst')
+    vi.mocked(api.adminUsage).mockReturnValueOnce(new Promise((_, reject) => { fail = reject }))
+    const refresh = screen.getByRole('button', {name: 'Refresh usage'})
+    fireEvent.click(refresh)
+    fireEvent.click(refresh)
+    expect(refresh).toBeDisabled()
+    expect(screen.getByText('Refreshing usage…')).toBeInTheDocument()
+    expect(screen.getByText('analyst')).toBeInTheDocument()
+    expect(api.adminUsage).toHaveBeenCalledTimes(2)
+    await act(async () => { fail(new Error('Offline')) })
+    expect(screen.getByRole('alert')).toHaveTextContent(/Previously loaded usage may be out of date/)
+    expect(refresh).toBeEnabled()
+  })
+
+  it('does not show the prior tenant or sign out a new session on an obsolete 401', async () => {
+    let fail!: (error: Error) => void
+    const unauthorized = vi.fn()
+    vi.mocked(api.adminUsage).mockResolvedValue(usage)
+    const { rerender } = render(<UsageSection apiKey="first" onUnauthorized={unauthorized}/>)
+    await screen.findByText('analyst')
+    vi.mocked(api.adminUsage).mockReturnValueOnce(new Promise((_, reject) => { fail = reject }))
+    fireEvent.click(screen.getByRole('button', {name: 'Refresh usage'}))
+    vi.mocked(api.adminUsage).mockResolvedValueOnce({...usage, users: []})
+    rerender(<UsageSection apiKey="second" onUnauthorized={unauthorized}/>)
+    expect(screen.queryByText('analyst')).not.toBeInTheDocument()
+    await screen.findByRole('img')
+    await act(async () => { fail(new ApiError(401, 'Old session expired')) })
+    expect(unauthorized).not.toHaveBeenCalled()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 })

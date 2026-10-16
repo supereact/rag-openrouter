@@ -1,24 +1,14 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
 import { RefreshCw, ThumbsUp, ThumbsDown } from 'lucide-react'
-import { api, ApiError } from './api'
-import type { AdminFeedback } from './types'
+import { api } from './api'
+import { useAdminResource } from './useAdminResource'
 
 export default function FeedbackQualitySection({apiKey,onUnauthorized}: {
   apiKey: string; onUnauthorized: () => void
 }) {
   const [days,setDays] = useState<7|30>(30)
-  const [data,setData] = useState<AdminFeedback|null>(null)
-  const [loading,setLoading] = useState(true)
-  const [error,setError] = useState('')
-  const reload = useCallback(async () => {
-    setLoading(true); setError('')
-    try { setData(await api.adminFeedback(apiKey,days)) }
-    catch (err) {
-      if (err instanceof ApiError && err.status===401) onUnauthorized()
-      else setError(err instanceof Error ? err.message : 'Could not load feedback')
-    } finally { setLoading(false) }
-  },[apiKey,days,onUnauthorized])
-  useEffect(() => { void reload() },[reload])
+  const loader = useCallback(() => api.adminFeedback(apiKey, days), [apiKey, days])
+  const { data, error, loading, stale, updatedAt, refresh } = useAdminResource(loader, onUnauthorized)
   const highest = Math.max(1,...(data?.daily ?? []).map(d=>d.up+d.down))
   return <section className="bg-white rounded-xl border border-slate-200 p-5 space-y-4" aria-label="Answer quality analytics">
     <div className="flex flex-wrap gap-3 items-center justify-between">
@@ -28,11 +18,12 @@ export default function FeedbackQualitySection({apiKey,onUnauthorized}: {
         <select aria-label="Feedback reporting period" value={days} onChange={e=>setDays(Number(e.target.value) as 7|30)} className="rounded-lg border border-slate-200 p-2 text-sm">
           <option value={7}>7 days</option><option value={30}>30 days</option>
         </select>
-        <button type="button" onClick={()=>void reload()} className="border rounded-lg p-2 text-sm flex gap-1 items-center"><RefreshCw size={14}/> Refresh</button>
+        <button type="button" disabled={loading} onClick={()=>void refresh()} className="border rounded-lg p-2 text-sm flex gap-1 items-center"><RefreshCw size={14}/> Refresh feedback</button>
       </div>
     </div>
-    {loading && <p role="status" className="text-sm text-slate-500">Loading feedback…</p>}
-    {error && <p role="alert" className="notice-error">{error}</p>}
+    {loading && <p role="status" className="text-sm text-slate-500">{data ? 'Refreshing feedback…' : 'Loading feedback…'}</p>}
+    {error && <p role="alert" className="notice-error">{error}{stale && ' Previously loaded feedback may be out of date.'}</p>}
+    {updatedAt && <p className="text-xs text-slate-500">Feedback last updated: {updatedAt.toLocaleTimeString()}</p>}
     {data && <>
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         {[

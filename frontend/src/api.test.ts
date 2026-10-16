@@ -4,6 +4,22 @@ import { ApiError, api } from './api'
 afterEach(() => vi.unstubAllGlobals())
 
 describe('browser API client', () => {
+  it('uses protected library queries, access deltas and failed-job deletion', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response('{}', {status:200}))
+    vi.stubGlobal('fetch',fetchMock)
+    await api.library('key',new URLSearchParams({page:'2',page_size:'50',q:'a & b',status:'failed',file_type:'pdf'}))
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/documents/library?page=2&page_size=50&q=a+%26+b&status=failed&file_type=pdf')
+    await api.documentAccess('key',11)
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/documents/11/access')
+    await api.updateDocumentAccess('key',11,{grant_user_ids:[2,3],revoke_user_ids:[4]})
+    expect(fetchMock.mock.calls[2][1].method).toBe('PATCH')
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({grant_user_ids:[2,3],revoke_user_ids:[4]})
+    fetchMock.mockResolvedValueOnce(new Response(null,{status:204}))
+    await expect(api.removeJob('key','failed-id')).resolves.toBeUndefined()
+    expect(fetchMock.mock.calls[3][0]).toBe('/api/ingestion-jobs/failed-id')
+    expect(fetchMock.mock.calls[3][1].method).toBe('DELETE')
+    for (const [, options] of fetchMock.mock.calls) expect(options.headers.get('Authorization')).toBe('Bearer key')
+  })
   it('password login sends no Authorization header and never persists a token', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       access_token:'rags_test',token_type:'bearer',expires_in:43200,

@@ -26,3 +26,11 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 
 /* Inline code only: do not override fenced code block styling. */
 .rag-markdown :not(pre) > code { background: #e8edf5; border-radius: 4px; padding: 2px 5px; font-size: .9em; }
+html, body, #root { height: 100%; overflow: hidden; }
+.page-frame { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.page-content { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+.workspace-header { flex-shrink: 0; flex-wrap: wrap; }
+.management-table { width: 100%; text-align: left; border-collapse: collapse; font-size: .875rem; }
+.management-table th, .management-table td { padding: 14px 16px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+.management-table th { color: #64748b; background: #f8fafc; font-weight: 600; }
+.table-button { border: 1px solid #cbd5e1; border-radius: 8px; padding: 6px 10px; }

@@ -5,24 +5,26 @@ from time import perf_counter
 from uuid import uuid4
 from uuid import UUID
 from contextlib import asynccontextmanager
+from typing import Literal
 
 import psycopg
-from fastapi import FastAPI, HTTPException, File, UploadFile, Depends, Response, Request
+from fastapi import FastAPI, HTTPException, File, UploadFile, Depends, Response, Request, Query
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse
 
 from app.db import db_connection
-from app.ingestion_jobs import queue_upload, list_jobs, get_job, job_health
+from app.ingestion_jobs import queue_upload, list_jobs, get_job, job_health, remove_failed_job
+from app.document_library import list_library
 from app.model_warmup import warmup_local_models
 from app.observability import measure, reset_llm_usage, save_request_usage, snapshot, peek_llm_usage
 from app.original_pdfs import store_pdf, remove_pdf, authorized_pdf
 from app.security import Principal, require_principal, require_editor, bearer
-from app import account_auth, settings, usage_ledger, credit_budgets, conversations, knowledge_bases, answer_feedback
+from app import account_auth, settings, usage_ledger, credit_budgets, conversations, knowledge_bases, answer_feedback, document_access
 from app.file_ingestion import MAX_FILE_BYTES, extract_document, extract_pdf_pages
 from app.schemas import (
     AskResponse, IngestRequest, IngestResponse, SearchRequest, SearchResponse,
-    ShareRequest, IngestionJob, EnqueuedJob,
+    ShareRequest, IngestionJob, EnqueuedJob, DocumentAccessResponse, DocumentAccessUpdate, DocumentLibrary,
 )
 from app.services import (
     ingest_document, ingest_pdf_pages, search_documents, answer_question,
@@ -123,7 +125,8 @@ def _run_ask(body: SearchRequest, principal: Principal) -> AskResponse:
         with measure(principal.tenant_id, "ask", "retrieval"):
             hits = search_documents(body.question, body.top_k, principal=principal, **scope)
         with measure(principal.tenant_id, "ask", "generation"):
-            generation_attempted = True
+            # Empty retrieval returns a local answer without contacting the provider.
+            generation_attempted = bool(hits)
             answer = answer_question(body.question, hits)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -214,6 +217,37 @@ def list_documents(principal: Principal = Depends(require_principal)):
     return {"documents": visible_documents(principal)}
 
 
+@app.get('/documents/library', response_model=DocumentLibrary)
+def document_library(page: int = Query(1, ge=1), page_size: int = Query(20, ge=20, le=100),
+                     q: str = Query('', max_length=200),
+                     status: Literal['indexed', 'queued', 'processing', 'failed'] | None = None,
+                     file_type: Literal['pdf', 'md', 'txt'] | None = None,
+                     principal: Principal = Depends(require_principal)):
+    if page_size not in (20, 50, 100):
+        raise HTTPException(422, 'page_size must be 20, 50 or 100')
+    return list_library(principal, page, page_size, q, status, file_type)
+
+
+@app.get('/documents/{document_id}/access', response_model=DocumentAccessResponse)
+def get_document_access(document_id: int, principal: Principal = Depends(require_editor)):
+    try:
+        return document_access.get_access(principal, document_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail='Document not found') from exc
+
+
+@app.patch('/documents/{document_id}/access', response_model=DocumentAccessResponse)
+def update_document_access(document_id: int, body: DocumentAccessUpdate,
+                           principal: Principal = Depends(require_editor)):
+    try:
+        return document_access.update_access(principal, document_id,
+                                             body.grant_user_ids, body.revoke_user_ids)
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail='Document not found') from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/documents/{document_id}/share")
 def grant_document_access(
     document_id: int, body: ShareRequest,
@@ -262,6 +296,19 @@ def ingestion_job_detail(job_id: UUID, principal: Principal = Depends(require_pr
     if result is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return result
+
+
+@app.delete('/ingestion-jobs/{job_id}', status_code=204)
+def delete_failed_upload(job_id: UUID, principal: Principal = Depends(require_editor)):
+    try:
+        remove_failed_job(principal, job_id)
+    except PermissionError as exc:
+        raise HTTPException(404, 'Job not found') from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(503, 'Could not remove staged upload; job retained') from exc
+    return Response(status_code=204)
 
 
 @app.get("/documents/{document_id}/original-pdf")

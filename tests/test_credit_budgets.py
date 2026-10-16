@@ -125,13 +125,18 @@ def test_successful_reservation_settlement_is_idempotent(monkeypatch):
     assert conn.reservations[rid]=='settled'
 
 
-def test_unreported_cost_keeps_hold(monkeypatch):
+@pytest.mark.parametrize('usage,expected_events', [
+    (None, 0),
+    ({}, 0),
+    ({'prompt_tokens': 9}, 1),
+])
+def test_unreported_cost_keeps_hold(monkeypatch, usage, expected_events):
     conn = FakeConn(tenant=(Decimal('2'),False,Decimal('0.01')))
     inject(monkeypatch,conn)
     rid = budget.reserve_request(READER)
-    assert budget.settle_request(rid, READER, 'test/model', {'prompt_tokens':9})=='unknown'
+    assert budget.settle_request(rid, READER, 'test/model', usage)=='unknown'
     assert conn.reservations[rid]=='unknown'
-    assert conn.event_inserts==1
+    assert conn.event_inserts==expected_events
 
 
 def test_cross_tenant_settlement_not_permitted(monkeypatch):

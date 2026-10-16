@@ -1,19 +1,21 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import {
-  ArrowRight, BookOpen, Check, ChevronDown, ChevronRight, Copy,
-  FilePlus2, FileText, FolderOpen, KeyRound, Layers, LogOut, LockKeyhole,
-  Menu, MessageSquareText, Search, Send, ShieldCheck, Trash2, UploadCloud,
-  Users, X, LayoutDashboard, UserCog, Plus, Pencil, ThumbsUp, ThumbsDown,
+  ArrowRight, BookOpen, ChevronDown, ChevronRight, Copy,
+  FolderOpen, KeyRound, Layers, LogOut, LockKeyhole,
+  Menu, MessageSquareText, Send, ShieldCheck, Trash2,
+  LayoutDashboard, UserCog, Plus, Pencil, ThumbsUp, ThumbsDown,
 } from 'lucide-react'
 import { ApiError, api } from './api'
-import type { ChatEntry, DocumentRecord, Identity, IngestionJob, SearchHit, SavedConversation, KnowledgeBase, AnswerFeedback, FeedbackReason } from './types'
+import type { ChatEntry, Identity, SearchHit, SavedConversation, KnowledgeBase, AnswerFeedback, FeedbackReason } from './types'
 import MarkdownAnswer from './MarkdownAnswer'
 import PdfViewer from './PdfViewer'
 import { DashboardPanel, UserManagementPanel } from './AdminPanel'
 import KnowledgeBasesPanel from './KnowledgeBasesPanel'
+import DocumentsPanel from './DocumentsPanel'
+import PageFrame from './PageFrame'
+import { followLink, navigate, returnDestination, routes, useLocation } from './navigation'
 
 interface Session { key: string; identity: Identity }
-type Tab = 'chat' | 'documents' | 'dashboard' | 'users' | 'knowledge-bases'
 const commonQuestions = [
   'What are the phases of incident response?',
   'How do I troubleshoot VPN connection issues?',
@@ -62,7 +64,7 @@ function SignIn({ onLogin }: { onLogin: (key: string) => Promise<void> }) {
     finally { setBusy(false) }
   }
 
-  return <div className="min-h-screen bg-[#080f1e] flex flex-col">
+  return <div className="h-dvh overflow-y-auto bg-[#080f1e] flex flex-col">
     <div className="p-7 sm:p-10"><Brand /></div>
     <div className="flex-1 flex items-center justify-center p-5">
       <div className="w-full max-w-[460px] rounded-2xl border border-white/10 bg-white/[.045] p-7 sm:p-9 shadow-2xl">
@@ -338,11 +340,8 @@ function ChatPanel({ session, onUnauthorized }: { session: Session; onUnauthoriz
         </div>)}
       </div>
     </aside>
-    <div className="flex flex-col flex-1 min-w-0 min-h-0">
-    <header className="workspace-header">
-      <div><h1 className="text-xl sm:text-2xl font-semibold tracking-tight text-slate-900">Knowledge Assistant</h1>
-        <p className="text-sm mt-1 text-slate-500">Ask questions grounded in your accessible documents.</p></div>
-      <div className="flex gap-2 items-center">
+    <PageFrame title="Knowledge Assistant" subtitle="Ask questions grounded in your accessible documents."
+      actions={<div className="flex flex-wrap gap-2 items-center min-w-0">
         <button type="button" onClick={() => void newConversation()} disabled={busy || loadingConversation}
           className="md:hidden text-xs rounded-lg border border-slate-200 bg-white px-2 py-2">New chat</button>
         <select className="md:hidden max-w-28 text-xs border border-slate-200 rounded-lg p-2" aria-label="Saved conversation"
@@ -363,9 +362,20 @@ function ChatPanel({ session, onUnauthorized }: { session: Session; onUnauthoriz
         <select aria-label="Number of sources" value={topK} onChange={event => setTopK(Number(event.target.value))} className="rounded-lg border border-slate-200 px-2 py-2 bg-white text-slate-800">
           {[3, 5, 8, 10].map(k => <option value={k} key={k}>{k}</option>)}
         </select>
-      </label></div>
-    </header>
-    <div className="flex-1 overflow-auto px-4 sm:px-8 py-7">
+      </label></div>}
+      footer={<div className="shrink-0 border-t border-slate-200 bg-white px-4 sm:px-8 py-4">
+      <form className="max-w-3xl mx-auto" onSubmit={event => { event.preventDefault(); void send() }}>
+        <div className="border border-slate-300 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-100 rounded-2xl p-2 flex gap-2 items-end">
+          <textarea aria-label="Ask a question" rows={2} maxLength={2000} value={question} onChange={event => setQuestion(event.target.value)}
+            onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() } }}
+            placeholder="Ask anything about your documents…" className="resize-none flex-1 min-w-0 py-2 px-3 outline-none text-sm text-slate-800 placeholder:text-slate-400"/>
+          <button type="submit" aria-label="Send question" disabled={busy || loadingConversation || question.trim().length < 3} className="btn-primary h-10 w-10 !p-0 justify-center"><Send size={17}/></button>
+        </div>
+        {error && <p role="alert" className="text-rose-600 mt-2 text-xs">{error}</p>}
+        <p className="text-center text-[11px] mt-2 text-slate-400">Answers can be incorrect. Verify important claims against retrieved sources. Enter to send · Shift+Enter for new line.</p>
+      </form>
+    </div>}>
+    <div className="px-4 sm:px-8 py-7">
       <div className="max-w-3xl mx-auto space-y-7">
         {history.length === 0 && <div className="pt-12 sm:pt-20 text-center">
           <div className="w-16 h-16 rounded-2xl bg-indigo-100 text-indigo-600 grid place-items-center mx-auto mb-5"><BookOpen size={29}/></div>
@@ -409,207 +419,49 @@ function ChatPanel({ session, onUnauthorized }: { session: Session; onUnauthoriz
         <div ref={endRef}/>
       </div>
     </div>
-    <div className="border-t border-slate-200 bg-white px-4 sm:px-8 py-4">
-      <form className="max-w-3xl mx-auto" onSubmit={event => { event.preventDefault(); void send() }}>
-        <div className="border border-slate-300 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-100 rounded-2xl p-2 flex gap-2 items-end">
-          <textarea aria-label="Ask a question" rows={2} maxLength={2000} value={question} onChange={event => setQuestion(event.target.value)}
-            onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() } }}
-            placeholder="Ask anything about your documents…" className="resize-none flex-1 min-w-0 py-2 px-3 outline-none text-sm text-slate-800 placeholder:text-slate-400"/>
-          <button type="submit" aria-label="Send question" disabled={busy || loadingConversation || question.trim().length < 3} className="btn-primary h-10 w-10 !p-0 justify-center"><Send size={17}/></button>
-        </div>
-        {error && <p role="alert" className="text-rose-600 mt-2 text-xs">{error}</p>}
-        <p className="text-center text-[11px] mt-2 text-slate-400">Answers can be incorrect. Verify important claims against retrieved sources. Enter to send · Shift+Enter for new line.</p>
-      </form>
-    </div>
     {pdfView && <PdfViewer apiKey={session.key} documentId={pdfView.documentId}
       title={pdfView.title} page={pdfView.page} onClose={closePdf}
       onUnauthorized={onUnauthorized}/>}
-    </div>
-  </div>
-}
-
-function DocumentsPanel({ session, onUnauthorized }: { session: Session; onUnauthorized: () => void }) {
-  const [documents, setDocuments] = useState<DocumentRecord[]>([])
-  const [loading, setLoading] = useState(true)
-  const [jobs, setJobs] = useState<IngestionJob[]>([])
-  const seenCompletedJobs = useRef(new Set<string>())
-  const [busyId, setBusyId] = useState<number | null>(null)
-  const [pdfView, setPdfView] = useState<{ documentId: number; title: string; page: number } | null>(null)
-  const closePdf = useCallback(() => setPdfView(null), [])
-  const [uploading, setUploading] = useState(false)
-  const [error, setError] = useState('')
-  const [notice, setNotice] = useState('')
-  const [search, setSearch] = useState('')
-  const [sharingId, setSharingId] = useState<number | null>(null)
-  const [shareTo, setShareTo] = useState('')
-  const writable = session.identity.role !== 'reader'
-  const refresh = useCallback(async () => {
-    return api.documents(session.key).then(setDocuments)
-  }, [session.key])
-
-  function report(err: unknown) {
-    if (err instanceof ApiError && err.status === 401) onUnauthorized()
-    else setError(describeError(err))
-  }
-
-  useEffect(() => {
-    let active = true
-    api.documents(session.key).then(items => { if (active) setDocuments(items) })
-      .catch(err => { if (active) report(err) })
-      .finally(() => { if (active) setLoading(false) })
-    return () => { active = false }
-  // Only fetch on key changes; the auth callback is stable within a session.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.key])
-
-  useEffect(() => {
-    let active = true
-    const poll = async () => {
-      try {
-        const items = await api.jobs(session.key)
-        if (!active) return
-        setJobs(items)
-        const newlyComplete = items.some(job => {
-          if (job.status !== 'completed' || seenCompletedJobs.current.has(job.id)) return false
-          seenCompletedJobs.current.add(job.id)
-          return true
-        })
-        if (newlyComplete) await refresh()
-      } catch (err) {
-        if (active && err instanceof ApiError && err.status === 401) onUnauthorized()
-      }
-    }
-    void poll()
-    const interval = window.setInterval(() => void poll(), 3500)
-    return () => { active = false; window.clearInterval(interval) }
-  }, [session.key, refresh, onUnauthorized])
-
-  async function upload(file: File | undefined) {
-    if (!file || uploading) return
-    setError(''); setNotice('')
-    if (!/\.(txt|md|pdf)$/i.test(file.name)) { setError('Only .txt, .md, and .pdf files are supported.'); return }
-    if (file.size > 50 * 1024 * 1024) { setError('Maximum file size is 50 MB.'); return }
-    setUploading(true)
-    try {
-      const job = await api.uploadQueued(session.key, file)
-      setNotice(`${job.filename} queued for background indexing (job ${job.id.slice(0, 8)}).`)
-      setJobs(await api.jobs(session.key))
-    } catch (err) { report(err) }
-    finally { setUploading(false) }
-  }
-
-  async function share(id: number) {
-    if (!shareTo.trim()) return
-    setBusyId(id); setError(''); setNotice('')
-    try {
-      await api.share(session.key, id, shareTo.trim())
-      setNotice(`Document ${id} shared with ${shareTo.trim()} in your tenant.`)
-      setSharingId(null); setShareTo('')
-    } catch (err) { report(err) }
-    finally { setBusyId(null) }
-  }
-
-  async function remove(doc: DocumentRecord) {
-    if (!window.confirm(`Delete "${doc.title}" and its indexed chunks? This cannot be undone.`)) return
-    setBusyId(doc.id); setError(''); setNotice('')
-    try { await api.remove(session.key, doc.id); await refresh(); setNotice(`Deleted document ${doc.id}.`) }
-    catch (err) { report(err) }
-    finally { setBusyId(null) }
-  }
-
-  async function reindex(doc: DocumentRecord, file: File | undefined) {
-    if (!file) return
-    if (file.name !== doc.title) { setError('The PDF filename must match the existing document title exactly.'); return }
-    setBusyId(doc.id); setError(''); setNotice('')
-    try {
-      const result = await api.reindex(session.key, doc.id, file)
-      setNotice(`Reindexed ${doc.title} (${result.chunk_count} chunks).`)
-    } catch (err) { report(err) }
-    finally { setBusyId(null) }
-  }
-
-  const filtered = documents.filter(doc => doc.title.toLowerCase().includes(search.toLowerCase()))
-  return <div className="min-h-0 h-full overflow-y-auto">
-    <header className="workspace-header"><div><h1 className="text-xl sm:text-2xl font-semibold tracking-tight text-slate-900">Documents</h1>
-      <p className="text-sm mt-1 text-slate-500">Only documents authorized for your account appear here.</p></div>
-      <div className="rounded-full text-xs bg-indigo-50 text-indigo-700 font-semibold px-3 py-2">{documents.length} visible</div>
-    </header>
-    <div className="max-w-5xl px-4 sm:px-8 py-7 mx-auto">
-      {writable && <section className="rounded-2xl border border-indigo-200 bg-gradient-to-r from-indigo-50 to-white p-5 sm:p-6 mb-7">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div><h2 className="font-semibold text-slate-900 flex items-center gap-2"><UploadCloud size={19} className="text-indigo-600"/> Add knowledge</h2>
-            <p className="text-sm text-slate-500 mt-1">Upload PDF, Markdown or text files. A separate background worker indexes them.</p></div>
-          <label className="btn-primary cursor-pointer justify-center">{uploading ? 'Uploading…' : 'Upload document'} <FilePlus2 size={16}/>
-            <input aria-label="Select document to upload" type="file" accept=".txt,.md,.pdf" disabled={uploading} className="sr-only" onChange={event => { void upload(event.target.files?.[0]); event.target.value = '' }}/>
-          </label>
-        </div>
-        <p className="text-xs text-slate-400 mt-4">Limit: 50 MB per file · Local developer environment only · Private by default</p>
-      </section>}
-      {error && <div role="alert" className="notice-error mb-4">{error}<button aria-label="Dismiss error" type="button" onClick={() => setError('')}><X size={16}/></button></div>}
-      {notice && <div role="status" className="notice-success mb-4"><Check size={16}/>{notice}<button aria-label="Dismiss notification" type="button" onClick={() => setNotice('')}><X size={16}/></button></div>}
-      {writable && jobs.length > 0 && <section aria-label="Ingestion jobs" className="mb-7 border border-slate-200 bg-white rounded-xl p-4 sm:p-5">
-        <h2 className="font-semibold text-slate-900 mb-3">Recent uploads</h2>
-        <div className="space-y-2">{jobs.map(job => <div key={job.id} className="flex gap-3 justify-between items-start text-sm border-t border-slate-100 pt-2">
-          <div className="min-w-0"><p className="font-medium text-slate-700 truncate" title={job.filename}>{job.filename}</p>
-            <p className="text-xs text-slate-500">{job.id.slice(0, 8)}{job.document_id ? ` · Document #${job.document_id}` : ''}{job.chunk_count != null ? ` · ${job.chunk_count} chunks` : ''}</p>
-            {job.status === 'failed' && <p role="alert" className="text-xs text-rose-600 mt-1">{job.error || 'Processing failed'}</p>}
-          </div>
-          <span aria-label={`Upload ${job.filename}: ${job.status}`} className={`text-xs font-semibold px-2.5 py-1 rounded-full ${job.status === 'completed' ? 'bg-green-100 text-green-800' : job.status === 'failed' ? 'bg-rose-100 text-rose-700' : 'bg-indigo-100 text-indigo-700'}`}>{job.status}</span>
-        </div>)}</div>
-      </section>}
-      <div className="flex items-center justify-between gap-3 mb-4">
-        <h2 className="font-semibold text-slate-900">Your knowledge library</h2>
-        <div className="relative"><Search size={15} className="absolute top-2.5 left-3 text-slate-400"/><input aria-label="Filter documents" placeholder="Filter documents…" value={search} onChange={event => setSearch(event.target.value)} className="rounded-lg border border-slate-200 py-2 pl-9 pr-3 text-sm w-44 sm:w-60 outline-none focus:border-indigo-400"/></div>
-      </div>
-      {loading && <div role="status" className="flex gap-2 items-center text-sm text-slate-500"><span className="spinner"/> Loading documents…</div>}
-      {!loading && filtered.length === 0 && <div className="border border-dashed border-slate-300 p-12 rounded-2xl text-center text-slate-500"><FolderOpen size={33} className="mx-auto mb-3 text-slate-400"/><p className="text-sm">No visible documents match your search.</p></div>}
-      <div className="space-y-3">{filtered.map(doc => <section key={doc.id} className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5 shadow-sm">
-        <div className="flex items-start gap-3">
-          <div className="shrink-0 w-10 h-10 rounded-lg bg-slate-100 text-slate-500 grid place-items-center"><FileText size={21}/></div>
-          <div className="flex-1 min-w-0"><h3 className="font-semibold text-slate-800 truncate" title={doc.title}>{doc.title}</h3>
-            <p className="text-xs text-slate-500 mt-1">ID {doc.id} · Owner #{doc.owner_user_id} · {new Date(doc.created_at).toLocaleDateString()}</p></div>
-          {writable && <div className="flex shrink-0 items-center gap-1">
-            <button aria-label={`Share ${doc.title}`} title="Share" type="button" className="icon-action" disabled={busyId === doc.id} onClick={() => { setSharingId(v => v === doc.id ? null : doc.id); setShareTo('') }}><Users size={17}/></button>
-            <button aria-label={`Delete ${doc.title}`} title="Delete" type="button" className="icon-action text-rose-500 hover:bg-rose-50" disabled={busyId === doc.id} onClick={() => void remove(doc)}><Trash2 size={17}/></button>
-          </div>}
-        </div>
-        {doc.title.toLowerCase().endsWith('.pdf') && <button type="button" aria-label={`View PDF ${doc.title}`}
-          className="mt-3 inline-block text-xs text-indigo-700 hover:underline"
-          onClick={() => setPdfView({ documentId: doc.id, title: doc.title, page: 1 })}>View original PDF</button>}
-        {writable && doc.title.toLowerCase().endsWith('.pdf') && <label className="inline-flex cursor-pointer mt-3 text-xs text-indigo-600 hover:text-indigo-700 font-medium gap-1.5 items-center"><UploadCloud size={14}/> Replace PDF / reindex
-          <input className="sr-only" aria-label={`Reindex ${doc.title}`} disabled={busyId === doc.id} type="file" accept=".pdf" onChange={event => { void reindex(doc, event.target.files?.[0]); event.target.value = '' }}/></label>}
-        {sharingId === doc.id && <form onSubmit={event => { event.preventDefault(); void share(doc.id) }} className="mt-4 border-t border-slate-100 pt-4 flex flex-wrap gap-2 items-center">
-          <input aria-label="Username to share with" value={shareTo} onChange={event => setShareTo(event.target.value)} placeholder="Same-tenant username" maxLength={80} className="border border-slate-300 rounded-lg px-3 py-2 text-sm flex-1 min-w-44 outline-none focus:border-indigo-400"/>
-          <button disabled={busyId === doc.id || !shareTo.trim()} type="submit" className="btn-primary !px-3 !py-2">Grant access</button>
-        </form>}
-      </section>)}</div>
-      {writable && <p className="text-xs text-slate-400 mt-6">Document owners and tenant admins can manage documents. The backend enforces permissions, so some editor actions may be denied.</p>}
-      {pdfView && <PdfViewer apiKey={session.key} documentId={pdfView.documentId}
-        title={pdfView.title} page={pdfView.page} onClose={closePdf}
-        onUnauthorized={onUnauthorized}/>}
-    </div>
+    </PageFrame>
   </div>
 }
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null)
-  const [tab, setTab] = useState<Tab>('chat')
+  const location = useLocation()
+  const path = location.split('?')[0]
+  const known = routes.some(route => route === path)
+  const adminRoute = path === '/dashboard' || path === '/users'
   const [navOpen, setNavOpen] = useState(false)
   const [authMessage, setAuthMessage] = useState('')
 
   async function login(key: string) {
     const identity = await api.me(key)
-    setSession({ key, identity }); setAuthMessage(''); setTab('chat')
+    setSession({ key, identity }); setAuthMessage('')
+    navigate(returnDestination(new URLSearchParams(window.location.search).get('returnTo')), true)
   }
   const logout = useCallback(() => {
     if (session?.key.startsWith('rags_')) void api.logout(session.key).catch(() => {})
-    setSession(null); setTab('chat'); setNavOpen(false)
+    setSession(null); setNavOpen(false)
+    navigate('/login', true)
   }, [session])
-  const onUnauthorized = useCallback(() => { logout(); setAuthMessage('Key is invalid or revoked. Please sign in again.') }, [logout])
+  const onUnauthorized = useCallback(() => {
+    const destination = returnDestination(window.location.pathname + window.location.search)
+    logout(); navigate(`/login?${new URLSearchParams({returnTo: destination})}`, true)
+    setAuthMessage('Key is invalid or revoked. Please sign in again.')
+  }, [logout])
 
+  useEffect(() => {
+    setNavOpen(false)
+    if (path === '/') navigate(session ? '/assistant' : '/login', true)
+    else if (!session && known) navigate(`/login?${new URLSearchParams({returnTo: location})}`, true)
+    else if (session && path === '/login') navigate(returnDestination(new URLSearchParams(location.split('?')[1]).get('returnTo')), true)
+  }, [location, path, known, session])
+
+  if (!session && !known && path !== '/' && path !== '/login') return <div className="h-dvh overflow-auto p-8"><h1>Page not found</h1><a href="/login" onClick={followLink}>Sign in</a></div>
   if (!session) return <><SignIn onLogin={login}/>{authMessage && <div role="alert" className="fixed bottom-5 right-5 rounded-lg bg-rose-100 p-3 text-rose-800 text-sm shadow-lg">{authMessage}</div>}</>
 
-  return <div className="flex h-screen overflow-hidden bg-[#f6f8fc]">
+  return <div className="flex h-dvh overflow-hidden bg-[#f6f8fc]">
     {navOpen && <button type="button" aria-label="Close navigation" onClick={() => setNavOpen(false)} className="fixed inset-0 z-20 bg-slate-950/40 md:hidden"/>}
     <aside className={`sidebar ${navOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0`}>
       <div className="p-6"><Brand/></div>
@@ -619,13 +471,16 @@ export default function App() {
             { key: 'dashboard' as const, title: 'Dashboard', icon: LayoutDashboard },
             { key: 'users' as const, title: 'User Management', icon: UserCog },
           ] : []),
-          { key: 'chat' as const, title: 'Assistant', icon: MessageSquareText },
+          { key: 'assistant' as const, title: 'Assistant', icon: MessageSquareText },
           { key: 'documents' as const, title: 'Documents', icon: FolderOpen },
           { key: 'knowledge-bases' as const, title: 'Knowledge Bases', icon: BookOpen },
         ]).map(item => {
           const Icon = item.icon
-          return <button key={item.key} onClick={() => { setTab(item.key); setNavOpen(false) }} aria-current={tab === item.key ? 'page' : undefined}
-            className={`nav-link ${tab === item.key ? 'nav-link-active' : ''}`} type="button"><Icon size={18}/>{item.title}</button>
+          return <a key={item.key} href={`/${item.key}`} onClick={event => {
+            followLink(event)
+            if (event.defaultPrevented) setNavOpen(false)
+          }} aria-current={path === `/${item.key}` ? 'page' : undefined}
+            className={`nav-link ${path === `/${item.key}` ? 'nav-link-active' : ''}`}><Icon size={18}/>{item.title}</a>
         })}
       </nav>
       <div className="mt-auto px-5 pb-6 space-y-4">
@@ -637,15 +492,17 @@ export default function App() {
         </div>
       </div>
     </aside>
-    <main className="flex-1 min-w-0 flex flex-col">
-      <div className="md:hidden h-14 border-b bg-white flex items-center px-4 gap-3"><button type="button" aria-label="Open navigation" onClick={() => setNavOpen(true)}><Menu size={22}/></button><span className="font-semibold">KnowledgeBase</span></div>
-      <div className={tab === 'chat' ? 'flex-1 min-h-0' : 'hidden'}>
+    <main className="flex-1 min-w-0 min-h-0 overflow-hidden flex flex-col">
+      <div className="md:hidden h-14 shrink-0 border-b bg-white flex items-center px-4 gap-3"><button type="button" aria-label="Open navigation" onClick={() => setNavOpen(true)}><Menu size={22}/></button><span className="font-semibold">KnowledgeBase</span></div>
+      <div className={path === '/assistant' ? 'flex-1 min-h-0' : 'hidden'}>
         <ChatPanel session={session} onUnauthorized={onUnauthorized}/>
       </div>
-      {tab === 'documents' && <DocumentsPanel session={session} onUnauthorized={onUnauthorized}/>}
-      {tab === 'knowledge-bases' && <KnowledgeBasesPanel session={session} onUnauthorized={onUnauthorized}/> }
-      {tab === 'dashboard' && session.identity.role === 'admin' && <DashboardPanel apiKey={session.key} onUnauthorized={onUnauthorized}/>}
-      {tab === 'users' && session.identity.role === 'admin' && <UserManagementPanel apiKey={session.key} onUnauthorized={onUnauthorized} selfUserId={session.identity.user_id}/>}
+      {path === '/documents' && <DocumentsPanel session={session} onUnauthorized={onUnauthorized}/>}
+      {path === '/knowledge-bases' && <KnowledgeBasesPanel session={session} onUnauthorized={onUnauthorized}/> }
+      {path === '/dashboard' && session.identity.role === 'admin' && <DashboardPanel apiKey={session.key} onUnauthorized={onUnauthorized}/>}
+      {path === '/users' && session.identity.role === 'admin' && <UserManagementPanel apiKey={session.key} onUnauthorized={onUnauthorized} selfUserId={session.identity.user_id}/>}
+      {adminRoute && session.identity.role !== 'admin' && <PageFrame title="Access denied" subtitle="Administrator access is required."><p className="p-6">Choose an available page from navigation.</p></PageFrame>}
+      {!known && path !== '/' && path !== '/login' && <PageFrame title="Page not found" subtitle="This page does not exist."><a href="/assistant" onClick={followLink} className="block p-6 text-indigo-700">Return to Assistant</a></PageFrame>}
     </main>
   </div>
 }

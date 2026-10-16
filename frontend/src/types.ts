@@ -11,6 +11,23 @@ export interface DocumentRecord {
   owner_user_id: number
   created_at: string
 }
+export interface LibraryRow {
+  kind: 'document' | 'upload'; id: string; title: string; created_at: string;
+  status: 'indexed' | 'queued' | 'processing' | 'failed'; owner_user_id: number;
+  error: string | null; can_manage: boolean;
+  assigned_users: {id: number; username: string}[] | null
+}
+export interface DocumentLibrary { items: LibraryRow[]; total: number; page: number; page_size: number; pages: number }
+export interface DocumentAccessUser {
+  id: number
+  username: string
+  email: string | null
+  is_active: boolean
+  shared: boolean
+  automatic_access: 'owner' | 'admin' | null
+}
+export interface DocumentAccess { users: DocumentAccessUser[] }
+export interface DocumentAccessUpdate { grant_user_ids: number[]; revoke_user_ids: number[] }
 export interface SearchHit {
   source_number: number
   document_id: number

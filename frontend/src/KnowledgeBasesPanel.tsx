@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { BookOpen, FolderPlus, Plus, Trash2, X } from 'lucide-react'
 import { ApiError, api } from './api'
+import PageFrame from './PageFrame'
 import type { DocumentRecord, Identity, KnowledgeBase } from './types'
 
 interface Props {
@@ -121,11 +122,8 @@ export default function KnowledgeBasesPanel({ session, onUnauthorized }: Props) 
   const options = available.filter(doc => !memberIds.has(doc.id) &&
     (session.identity.role === 'admin' || doc.owner_user_id === session.identity.user_id))
 
-  return <div className="min-w-0 overflow-x-hidden overflow-y-auto flex-1 px-5 sm:px-8 py-8">
-    <div className="max-w-5xl mx-auto min-w-0 space-y-6">
-      <div><h1 className="text-2xl font-semibold text-slate-900">Knowledge Bases</h1>
-        <p className="text-sm text-slate-500 mt-2">Group documents and select a knowledge base in chat. Document permissions always apply.</p>
-      </div>
+  return <PageFrame title="Knowledge Bases" subtitle="Group documents and select a knowledge base in chat. Document permissions always apply.">
+    <div className="max-w-5xl mx-auto min-w-0 space-y-6 px-5 sm:px-8 py-7">
       {error && <div role="alert" className="notice-error flex justify-between">{error}
         <button aria-label="Dismiss error" type="button" onClick={() => setError('')}><X size={17}/></button></div>}
       {editable && <form onSubmit={create} className="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
@@ -183,5 +181,5 @@ export default function KnowledgeBasesPanel({ session, onUnauthorized }: Props) 
         </section>
       </div>
     </div>
-  </div>
+  </PageFrame>
 }

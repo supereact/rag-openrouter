@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 """Public API input/output models."""
 from pydantic import BaseModel, Field
@@ -45,6 +45,49 @@ class AskResponse(BaseModel):
 
 class ShareRequest(BaseModel):
     username: str = Field(min_length=2, max_length=80, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]+$")
+
+
+class LibraryRecipient(BaseModel):
+    id: int
+    username: str
+
+
+class LibraryRow(BaseModel):
+    kind: Literal['document', 'upload']
+    id: str
+    title: str
+    created_at: datetime
+    status: Literal['indexed', 'queued', 'processing', 'failed']
+    owner_user_id: int
+    error: str | None
+    can_manage: bool
+    assigned_users: list[LibraryRecipient] | None
+
+
+class DocumentLibrary(BaseModel):
+    items: list[LibraryRow]
+    total: int
+    page: int
+    page_size: int
+    pages: int
+
+
+class DocumentAccessUser(BaseModel):
+    id: int
+    username: str
+    email: str | None
+    is_active: bool
+    shared: bool
+    automatic_access: Literal['owner', 'admin'] | None
+
+
+class DocumentAccessResponse(BaseModel):
+    users: list[DocumentAccessUser]
+
+
+class DocumentAccessUpdate(BaseModel):
+    grant_user_ids: list[Annotated[int, Field(strict=True, gt=0)]] = Field(default_factory=list, max_length=1000)
+    revoke_user_ids: list[Annotated[int, Field(strict=True, gt=0)]] = Field(default_factory=list, max_length=1000)
 
 
 class EnqueuedJob(BaseModel):

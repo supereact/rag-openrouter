@@ -1,4 +1,5 @@
-import type { AskResponse, DocumentRecord, Identity, IngestResponse, IngestionJob, EnqueuedJob, AuthToken, AdminUser, AdminInvitation, NewInvitation, AdminDashboard, AdminUsage, AdminBudgets, Role, SavedConversation, SavedConversationDetail, KnowledgeBase, ConversationAskResponse, AnswerFeedback, AdminFeedback } from './types'
+import type { AskResponse, DocumentRecord, DocumentAccess, DocumentAccessUpdate, Identity, IngestResponse, IngestionJob, EnqueuedJob, AuthToken, AdminUser, AdminInvitation, NewInvitation, AdminDashboard, AdminUsage, AdminBudgets, Role, SavedConversation, SavedConversationDetail, KnowledgeBase, ConversationAskResponse, AnswerFeedback, AdminFeedback } from './types'
+import type { DocumentLibrary } from './types'
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -119,6 +120,8 @@ export const api = {
     const result = await request<{ documents: DocumentRecord[] }>(key, '/documents')
     return result.documents
   },
+  library: (key: string, query: URLSearchParams) => request<DocumentLibrary>(key, `/documents/library?${query}`),
+  removeJob: (key: string, id: string) => request<void>(key, `/ingestion-jobs/${encodeURIComponent(id)}`, {method: 'DELETE'}),
   upload: (key: string, file: File) => {
     const body = new FormData()
     body.append('file', file)
@@ -135,6 +138,12 @@ export const api = {
   share: (key: string, id: number, username: string) =>
     request<{ status: string }>(key, `/documents/${id}/share`, {
       method: 'POST', body: JSON.stringify({ username }),
+    }),
+  documentAccess: (key: string, id: number) =>
+    request<DocumentAccess>(key, `/documents/${id}/access`),
+  updateDocumentAccess: (key: string, id: number, changes: DocumentAccessUpdate) =>
+    request<DocumentAccess>(key, `/documents/${id}/access`, {
+      method: 'PATCH', body: JSON.stringify(changes),
     }),
   reindex: (key: string, id: number, file: File) => {
     const body = new FormData()

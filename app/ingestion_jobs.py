@@ -107,7 +107,25 @@ def get_job(principal: Principal, job_id: UUID) -> dict | None:
     return _job_dict(row) if row else None
 
 
-def claim_next_job() -> tuple[UUID, str, Principal, int] | None:
+def remove_failed_job(principal: Principal, job_id: UUID) -> None:
+    if principal.role not in ('admin', 'editor'):
+        raise PermissionError('Write permission required')
+    with db_connection() as conn:
+        row = conn.execute('''SELECT status FROM ingestion_jobs
+            WHERE id=%s AND tenant_id=%s AND (user_id=%s OR %s='admin')
+            FOR UPDATE''', (job_id, principal.tenant_id, principal.user_id,
+                           principal.role)).fetchone()
+        if row is None:
+            raise PermissionError('Job not found')
+        if row[0] != 'failed':
+            raise ValueError('Only failed uploads can be removed')
+        # Unlink first: a cleanup failure rolls back and retains the job record.
+        # Workers may already have removed staged input after terminal failure.
+        spool_path(job_id).unlink(missing_ok=True)
+        conn.execute('DELETE FROM ingestion_jobs WHERE id=%s', (job_id,))
+
+
+def claim_next_job() -> tuple[UUID, str, Principal | None, int] | None:
     """Atomically claim a due job. Attempts are persisted before work starts."""
     with db_connection() as conn:
         row = conn.execute('''
@@ -126,13 +144,15 @@ def claim_next_job() -> tuple[UUID, str, Principal, int] | None:
         if row is None:
             return None
         user = conn.execute(
-            'SELECT role, username FROM app_users WHERE id=%s AND tenant_id=%s',
+            """SELECT role, username FROM app_users WHERE id=%s AND tenant_id=%s
+               AND is_active AND role IN ('admin','editor')""",
             (row[3], row[2]),
         ).fetchone()
-        if user is None:
-            raise RuntimeError('Job owner no longer exists')
-        return (row[0], row[1], Principal(user_id=row[3], tenant_id=row[2],
-                                         role=user[0], username=user[1]), int(row[4]))
+        # Return unauthorized claims for terminal finalization by the worker,
+        # rather than rolling back the claim and repeatedly taking the same job.
+        principal = (Principal(user_id=row[3], tenant_id=row[2],
+                               role=user[0], username=user[1]) if user else None)
+        return row[0], row[1], principal, int(row[4])
 
 
 def _heartbeat(job_id: UUID, attempt: int, stop: threading.Event) -> None:
@@ -173,6 +193,8 @@ def process_one_job() -> bool:
     heart = threading.Thread(target=_heartbeat, args=(job_id, attempt, stop), daemon=True)
     heart.start()
     try:
+        if principal is None or principal.role not in ('admin', 'editor'):
+            raise PermissionError('Upload owner is inactive or no longer permitted to ingest documents')
         with path.open('rb') as stream:
             data = stream.read(MAX_FILE_BYTES + 1)
         if title.lower().endswith('.pdf'):
