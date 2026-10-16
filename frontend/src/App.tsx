@@ -3,15 +3,17 @@ import {
   ArrowRight, BookOpen, Check, ChevronDown, ChevronRight, Copy,
   FilePlus2, FileText, FolderOpen, KeyRound, Layers, LogOut, LockKeyhole,
   Menu, MessageSquareText, Search, Send, ShieldCheck, Trash2, UploadCloud,
-  Users, X,
+  Users, X, LayoutDashboard, UserCog, Plus, Pencil, ThumbsUp, ThumbsDown,
 } from 'lucide-react'
 import { ApiError, api } from './api'
-import type { ChatEntry, DocumentRecord, Identity, IngestionJob, SearchHit } from './types'
+import type { ChatEntry, DocumentRecord, Identity, IngestionJob, SearchHit, SavedConversation, KnowledgeBase, AnswerFeedback, FeedbackReason } from './types'
 import MarkdownAnswer from './MarkdownAnswer'
 import PdfViewer from './PdfViewer'
+import { DashboardPanel, UserManagementPanel } from './AdminPanel'
+import KnowledgeBasesPanel from './KnowledgeBasesPanel'
 
 interface Session { key: string; identity: Identity }
-type Tab = 'chat' | 'documents'
+type Tab = 'chat' | 'documents' | 'dashboard' | 'users' | 'knowledge-bases'
 const commonQuestions = [
   'What are the phases of incident response?',
   'How do I troubleshoot VPN connection issues?',
@@ -31,42 +33,85 @@ function Brand({ compact = false }: { compact?: boolean }) {
 }
 
 function SignIn({ onLogin }: { onLogin: (key: string) => Promise<void> }) {
+  const [mode, setMode] = useState<'key' | 'password' | 'register'>('password')
   const [key, setKey] = useState('')
+  const [email, setEmail] = useState('')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [invitation, setInvitation] = useState('')
   const [showKey, setShowKey] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
   async function submit(event: FormEvent) {
     event.preventDefault()
-    if (!key.trim() || busy) return
+    if (busy) return
     setBusy(true); setError('')
-    try { await onLogin(key.trim()) }
-    catch (err) { setError(describeError(err)) }
+    try {
+      if (mode === 'key') await onLogin(key.trim())
+      else if (mode === 'password') {
+        const result = await api.loginPassword(email, password)
+        await onLogin(result.access_token)
+      } else {
+        if (password !== confirmPassword) throw new Error('Passwords do not match')
+        const result = await api.register(invitation, email, username, password)
+        await onLogin(result.access_token)
+      }
+    } catch (err) { setError(describeError(err)) }
     finally { setBusy(false) }
   }
 
   return <div className="min-h-screen bg-[#080f1e] flex flex-col">
     <div className="p-7 sm:p-10"><Brand /></div>
     <div className="flex-1 flex items-center justify-center p-5">
-      <div className="w-full max-w-[440px] rounded-2xl border border-white/10 bg-white/[.045] p-7 sm:p-9 shadow-2xl">
-        <div className="w-12 h-12 grid place-items-center rounded-xl bg-indigo-500/15 text-indigo-300 mb-7"><LockKeyhole size={22}/></div>
-        <h1 className="text-[27px] text-white font-semibold tracking-tight">Welcome back</h1>
-        <p className="mt-2 text-slate-400 text-sm leading-relaxed">Enter your existing Milestone 7 API key to access documents authorized for your account.</p>
-        <form onSubmit={submit} className="mt-8 space-y-4">
-          <label className="block text-sm font-medium text-slate-200" htmlFor="api-key">API key</label>
-          <div className="relative">
-            <KeyRound size={17} className="absolute left-3.5 top-3.5 text-slate-400"/>
-            <input id="api-key" autoComplete="off" spellCheck={false} type={showKey ? 'text' : 'password'}
-              value={key} onChange={event => setKey(event.target.value)} placeholder="rag_••••••••••••••••••"
-              className="w-full rounded-xl border border-slate-600/80 bg-slate-900 px-11 py-3 text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-400" />
-            <button className="absolute right-3 top-3 text-xs text-indigo-300 hover:text-indigo-200" type="button" onClick={() => setShowKey(v => !v)}>{showKey ? 'Hide' : 'Show'}</button>
-          </div>
+      <div className="w-full max-w-[460px] rounded-2xl border border-white/10 bg-white/[.045] p-7 sm:p-9 shadow-2xl">
+        <div className="w-12 h-12 grid place-items-center rounded-xl bg-indigo-500/15 text-indigo-300 mb-5"><LockKeyhole size={22}/></div>
+        <h1 className="text-[27px] text-white font-semibold tracking-tight">Welcome to KnowledgeBase</h1>
+        <p className="mt-2 text-slate-400 text-sm leading-relaxed">Sign in to your authorized workspace, or register with an invitation.</p>
+        <div className="flex flex-wrap gap-2 mt-5" role="group" aria-label="Authentication method">
+          <button type="button" className={`text-xs px-3 py-2 rounded-lg ${mode === 'password' ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-300'}`} onClick={() => {setMode('password');setError('')}}>Email sign in</button>
+          <button type="button" className={`text-xs px-3 py-2 rounded-lg ${mode === 'register' ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-300'}`} onClick={() => {setMode('register');setError('')}}>Sign up</button>
+          <button type="button" className={`text-xs px-3 py-2 rounded-lg ${mode === 'key' ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-300'}`} onClick={() => {setMode('key');setError('')}}>API key</button>
+        </div>
+        <form onSubmit={submit} className="mt-6 space-y-4">
+          {mode === 'key' ? <>
+            <label className="block text-sm font-medium text-slate-200" htmlFor="api-key">API key</label>
+            <div className="relative">
+              <KeyRound size={17} className="absolute left-3.5 top-3.5 text-slate-400"/>
+              <input id="api-key" autoComplete="off" spellCheck={false} type={showKey ? 'text' : 'password'} required
+                value={key} onChange={event => setKey(event.target.value)} placeholder="rag_••••••••••••••••••"
+                className="w-full rounded-xl border border-slate-600/80 bg-slate-900 px-11 py-3 text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-400" />
+              <button className="absolute right-3 top-3 text-xs text-indigo-300 hover:text-indigo-200" type="button" onClick={() => setShowKey(v => !v)}>{showKey ? 'Hide' : 'Show'}</button>
+            </div>
+          </> : <>
+            {mode === 'register' && <><label className="block text-sm text-slate-200" htmlFor="invitation-code">Invitation code</label>
+              <input id="invitation-code" value={invitation} onChange={e => setInvitation(e.target.value)} required autoComplete="off" placeholder="invite_…" className="w-full rounded-lg border border-slate-600 bg-slate-900 p-3 text-white"/>
+              <label className="block text-sm text-slate-200" htmlFor="signup-username">Username</label>
+              <input id="signup-username" value={username} onChange={e => setUsername(e.target.value)} required minLength={2} maxLength={80} className="w-full rounded-lg border border-slate-600 bg-slate-900 p-3 text-white"/>
+            </>}
+            <label className="block text-sm text-slate-200" htmlFor="account-email">Email address</label>
+            <input id="account-email" type="email" autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} required className="w-full rounded-lg border border-slate-600 bg-slate-900 p-3 text-white"/>
+            <label className="block text-sm text-slate-200" htmlFor="account-password">Password</label>
+            <input id="account-password" type="password" autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
+              value={password} onChange={e => setPassword(e.target.value)} required minLength={mode === 'register' ? 12 : 1}
+              className="w-full rounded-lg border border-slate-600 bg-slate-900 p-3 text-white"/>
+            {mode === 'register' && <>
+              <label className="block text-sm text-slate-200" htmlFor="confirm-password">Confirm password</label>
+              <input id="confirm-password" type="password" autoComplete="new-password" value={confirmPassword}
+                onChange={e => setConfirmPassword(e.target.value)} required minLength={12}
+                className="w-full rounded-lg border border-slate-600 bg-slate-900 p-3 text-white"/>
+              <p className="text-xs text-slate-400">Use a unique password of at least 12 characters. Your administrator supplies the invitation code.</p>
+            </>}
+          </>}
           {error && <p role="alert" className="text-rose-300 text-sm">{error}</p>}
-          <button disabled={busy || !key.trim()} className="btn-primary w-full justify-center" type="submit">{busy ? 'Checking key…' : 'Connect to workspace'} <ArrowRight size={17}/></button>
+          <button disabled={busy || (mode === 'key' ? !key.trim() : !email.trim() || !password.trim())} className="btn-primary w-full justify-center" type="submit">
+            {busy ? 'Authenticating…' : mode === 'register' ? 'Create account' : mode === 'password' ? 'Sign in' : 'Connect to workspace'} <ArrowRight size={17}/>
+          </button>
         </form>
         <div className="mt-7 pt-5 border-t border-white/10 flex gap-3 items-start text-slate-400 text-xs leading-5">
           <ShieldCheck size={18} className="shrink-0 text-teal-300"/>
-          Your key stays in this browser tab's memory and is cleared on refresh or sign out. This is a localhost developer interface, not an enterprise SSO login.
+          Credentials are sent to your local FastAPI service. Access tokens are kept in this tab's memory and cleared on refresh or sign out.
         </div>
       </div>
     </div>
@@ -105,12 +150,135 @@ function SourceList({ sources, entryId, onOpenPdf }: {
 function ChatPanel({ session, onUnauthorized }: { session: Session; onUnauthorized: () => void }) {
   const [question, setQuestion] = useState('')
   const [topK, setTopK] = useState(5)
+  const [bases, setBases] = useState<KnowledgeBase[]>([])
+  const [knowledgeBaseId, setKnowledgeBaseId] = useState<number | null>(null)
   const [history, setHistory] = useState<ChatEntry[]>([])
+  const [ratings, setRatings] = useState<Record<number,AnswerFeedback>>({})
+  const [ratingBusy, setRatingBusy] = useState<number | null>(null)
+  const [conversations, setConversations] = useState<SavedConversation[]>([])
+  const [activeId, setActiveId] = useState<number | null>(null)
+  const [loadingConversation, setLoadingConversation] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [pdfView, setPdfView] = useState<{ documentId: number; title: string; page: number } | null>(null)
   const endRef = useRef<HTMLDivElement>(null)
-  const sequence = useRef(0)
+  useEffect(() => {
+    let active = true
+    const load = () => {
+      void api.knowledgeBases(session.key).then(items => {
+        if (!active) return
+        setBases(items)
+        setKnowledgeBaseId(current => current !== null && items.some(x => x.id === current) ? current : null)
+      }).catch(err => {
+        if (active && err instanceof ApiError && err.status === 401) onUnauthorized()
+      })
+    }
+    load()
+    window.addEventListener('knowledge-bases-updated', load)
+    return () => { active = false; window.removeEventListener('knowledge-bases-updated', load) }
+  }, [session.key, onUnauthorized])
+  // Conversation messages have stable database IDs, used by citation anchor links.
+  useEffect(() => {
+    let alive = true
+    api.conversations(session.key).then(items => {
+      if (alive) setConversations(items)
+    }).catch(err => {
+      if (alive) {
+        if (err instanceof ApiError && err.status === 401) onUnauthorized()
+        else setError(describeError(err))
+      }
+    })
+    return () => { alive = false }
+  }, [session.key, onUnauthorized])
+
+  async function openConversation(id: number) {
+    if (busy || loadingConversation) return
+    setLoadingConversation(true); setError('')
+    try {
+      const item = await api.conversation(session.key, id)
+      const voteItems = await api.conversationFeedback(session.key, id)
+      setRatings(Object.fromEntries(voteItems.map(v => [v.message_id, v])))
+      setHistory(item.messages.map(message => ({
+        id: message.id, question: message.question, answer: message.answer,
+        sources: message.sources, redacted: message.redacted, createdAt: new Date(message.created_at),
+      })))
+      setActiveId(id)
+      setQuestion('')
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) onUnauthorized()
+      else setError(describeError(err))
+    } finally { setLoadingConversation(false) }
+  }
+
+  function clearChat() {
+    setActiveId(null); setHistory([]); setRatings({}); setQuestion(''); setError('')
+  }
+
+  async function newConversation() {
+    if (busy || loadingConversation) return
+    setLoadingConversation(true); setError('')
+    try {
+      // Create the record immediately so clicking New chat has a visible,
+      // persistent result even before the first question is sent.
+      const created = await api.createConversation(session.key, 'New chat')
+      clearChat()
+      setActiveId(created.id)
+      setConversations(previous => [created, ...previous.filter(c => c.id !== created.id)])
+    } catch (err) {
+      // Keep the previous conversation intact when creation fails.
+      if (err instanceof ApiError && err.status === 401) onUnauthorized()
+      else setError(describeError(err))
+    } finally { setLoadingConversation(false) }
+  }
+
+  async function renameSaved(item: SavedConversation) {
+    if (busy) return
+    const title = window.prompt('Rename conversation', item.title)?.trim()
+    if (!title || title === item.title || title.length > 120) return
+    try {
+      const updated = await api.renameConversation(session.key, item.id, title)
+      setConversations(old => old.map(c => c.id === updated.id ? updated : c))
+    } catch (err) { setError(describeError(err)) }
+  }
+
+  async function deleteSaved(item: SavedConversation) {
+    if (busy || !window.confirm(`Delete conversation “${item.title}”?`)) return
+    try {
+      await api.deleteConversation(session.key, item.id)
+      setConversations(old => old.filter(c => c.id !== item.id))
+      if (activeId === item.id) clearChat()
+    } catch (err) { setError(describeError(err)) }
+  }
+  async function saveRating(messageId: number, rating: 'up' | 'down', reason: FeedbackReason | null = null) {
+    if (activeId === null || ratingBusy !== null || busy || loadingConversation) return
+    setRatingBusy(messageId); setError('')
+    try {
+      const old = ratings[messageId]
+      if (old?.rating === rating) {
+        await api.deleteAnswerFeedback(session.key, activeId, messageId)
+        setRatings(prev => { const next = {...prev}; delete next[messageId]; return next })
+      } else {
+        const updated = await api.setAnswerFeedback(session.key, activeId, messageId, rating, reason)
+        setRatings(prev => ({...prev, [messageId]: updated}))
+      }
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) onUnauthorized()
+      else setError(describeError(err))
+    } finally { setRatingBusy(null) }
+  }
+
+  async function setDownvoteReason(messageId: number, reason: FeedbackReason | null) {
+    if (activeId === null || ratingBusy !== null) return
+    setRatingBusy(messageId); setError('')
+    try {
+      const result = await api.setAnswerFeedback(session.key, activeId, messageId, 'down', reason)
+      setRatings(prev => ({...prev,[messageId]:result}))
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) onUnauthorized()
+      else setError(describeError(err))
+    } finally { setRatingBusy(null) }
+  }
+
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }) }, [history.length, busy])
 
   const closePdf = useCallback(() => setPdfView(null), [])
@@ -121,14 +289,31 @@ function ChatPanel({ session, onUnauthorized }: { session: Session; onUnauthoriz
 
   async function send(override?: string) {
     const text = (override ?? question).trim()
-    if (busy || text.length < 3) return
+    if (busy || loadingConversation || text.length < 3) return
     setBusy(true); setError(''); setQuestion('')
     try {
-      const result = await api.ask(session.key, text, topK)
+      let id = activeId
+      if (id === null) {
+        const created = await api.createConversation(session.key, text.slice(0, 80))
+        id = created.id
+        setActiveId(id)
+        setConversations(previous => [created, ...previous])
+      }
+      const result = await api.askConversation(session.key, id, text, topK, knowledgeBaseId)
       setHistory(previous => [...previous, {
-        id: ++sequence.current, question: text, answer: result.answer,
+        id: result.message_id, question: text, answer: result.answer,
         sources: result.sources, createdAt: new Date(),
       }])
+      if (activeId !== null && conversations.some(c => c.id === id && c.title === 'New chat')) {
+        // Give a newly created chat a useful title after its first answer.
+        // Renaming is best-effort and must never turn a successful answer
+        // into a failed send or consume additional model credits.
+        void api.renameConversation(session.key, id, text.slice(0, 80))
+          .then(updated => setConversations(previous => [updated, ...previous.filter(c => c.id !== id)]))
+          .catch(() => {})
+      } else {
+        void api.conversations(session.key).then(setConversations).catch(() => {})
+      }
     } catch (err) {
       setQuestion(text)
       if (err instanceof ApiError && err.status === 401) onUnauthorized()
@@ -136,15 +321,49 @@ function ChatPanel({ session, onUnauthorized }: { session: Session; onUnauthoriz
     } finally { setBusy(false) }
   }
 
-  return <div className="flex flex-col h-full min-h-0">
+  return <div className="flex h-full min-h-0">
+    <aside className="hidden md:flex w-56 lg:w-64 border-r border-slate-200 bg-white shrink-0 flex-col" aria-label="Saved conversations">
+      <div className="p-3 border-b border-slate-200">
+        <button type="button" disabled={busy || loadingConversation} onClick={() => void newConversation()}
+          className="btn-primary w-full justify-center"><Plus size={16}/> New chat</button>
+      </div>
+      <div className="flex-1 overflow-y-auto p-2 space-y-1">
+        {conversations.length === 0 && <p className="px-3 py-4 text-xs text-slate-500">Your saved chats appear here.</p>}
+        {conversations.map(item => <div key={item.id} className={`flex items-center rounded-lg ${activeId === item.id ? 'bg-indigo-50' : 'hover:bg-slate-50'}`}>
+          <button type="button" disabled={busy || loadingConversation} onClick={() => void openConversation(item.id)}
+            aria-label={`Open conversation ${item.title}`}
+            className="flex-1 min-w-0 text-left p-2.5 text-xs text-slate-700 truncate" title={item.title}>{item.title}</button>
+          <button type="button" aria-label={`Rename conversation ${item.title}`} onClick={() => void renameSaved(item)} className="text-slate-500 p-1 hover:text-indigo-600"><Pencil size={13}/></button>
+          <button type="button" aria-label={`Delete conversation ${item.title}`} onClick={() => void deleteSaved(item)} className="text-slate-500 p-1 mr-1 hover:text-rose-600"><Trash2 size={13}/></button>
+        </div>)}
+      </div>
+    </aside>
+    <div className="flex flex-col flex-1 min-w-0 min-h-0">
     <header className="workspace-header">
       <div><h1 className="text-xl sm:text-2xl font-semibold tracking-tight text-slate-900">Knowledge Assistant</h1>
         <p className="text-sm mt-1 text-slate-500">Ask questions grounded in your accessible documents.</p></div>
+      <div className="flex gap-2 items-center">
+        <button type="button" onClick={() => void newConversation()} disabled={busy || loadingConversation}
+          className="md:hidden text-xs rounded-lg border border-slate-200 bg-white px-2 py-2">New chat</button>
+        <select className="md:hidden max-w-28 text-xs border border-slate-200 rounded-lg p-2" aria-label="Saved conversation"
+          value={activeId ?? ''} onChange={e => { if (e.target.value) void openConversation(Number(e.target.value)); else void newConversation() }}>
+          <option value="">New chat</option>
+          {conversations.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}
+        </select>
+      <label className="text-xs text-slate-500 flex items-center gap-2">Knowledge base
+        <select aria-label="Knowledge base" value={knowledgeBaseId ?? ''}
+          onChange={event => setKnowledgeBaseId(event.target.value ? Number(event.target.value) : null)}
+          disabled={busy || loadingConversation}
+          className="rounded-lg border border-slate-200 bg-white px-2 py-2 text-slate-800 max-w-36">
+          <option value="">All accessible documents</option>
+          {bases.map(base => <option key={base.id} value={base.id}>{base.name}</option>)}
+        </select>
+      </label>
       <label className="text-xs text-slate-500 flex items-center gap-2 whitespace-nowrap">Sources
         <select aria-label="Number of sources" value={topK} onChange={event => setTopK(Number(event.target.value))} className="rounded-lg border border-slate-200 px-2 py-2 bg-white text-slate-800">
           {[3, 5, 8, 10].map(k => <option value={k} key={k}>{k}</option>)}
         </select>
-      </label>
+      </label></div>
     </header>
     <div className="flex-1 overflow-auto px-4 sm:px-8 py-7">
       <div className="max-w-3xl mx-auto space-y-7">
@@ -162,9 +381,30 @@ function ChatPanel({ session, onUnauthorized }: { session: Session; onUnauthoriz
             <div className="flex items-center gap-2 mb-4"><div className="w-7 h-7 rounded-lg bg-indigo-100 grid place-items-center text-indigo-600"><Layers size={15}/></div><span className="text-xs font-semibold uppercase tracking-wider text-slate-500">Assistant</span><span className="text-[11px] text-slate-400 ml-auto">{entry.createdAt.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}</span></div>
             <div className="text-sm text-slate-800"><MarkdownAnswer text={entry.answer} sources={entry.sources} entryId={entry.id} onCitationClick={openPdf}/></div>
             <SourceList entryId={entry.id} sources={entry.sources} onOpenPdf={openPdf}/>
+            {!entry.redacted && activeId !== null && <div className="mt-4 flex flex-wrap items-center gap-2 text-xs border-t border-slate-200 pt-3" aria-label={`Feedback for answer ${entry.id}`}>
+              <span className="text-slate-500 mr-1">Was this answer useful?</span>
+              <button type="button" aria-label={`Helpful answer ${entry.id}`} aria-pressed={ratings[entry.id]?.rating === 'up'}
+                disabled={ratingBusy === entry.id || busy || loadingConversation}
+                onClick={() => void saveRating(entry.id, 'up')}
+                className={`rounded-lg border px-2 py-1.5 flex gap-1 items-center ${ratings[entry.id]?.rating === 'up' ? 'border-emerald-400 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-600'}`}><ThumbsUp size={14}/> Helpful</button>
+              <button type="button" aria-label={`Not helpful answer ${entry.id}`} aria-pressed={ratings[entry.id]?.rating === 'down'}
+                disabled={ratingBusy === entry.id || busy || loadingConversation}
+                onClick={() => void saveRating(entry.id, 'down')}
+                className={`rounded-lg border px-2 py-1.5 flex gap-1 items-center ${ratings[entry.id]?.rating === 'down' ? 'border-rose-400 bg-rose-50 text-rose-700' : 'border-slate-200 text-slate-600'}`}><ThumbsDown size={14}/> Not helpful</button>
+              {ratings[entry.id]?.rating === 'down' && <select aria-label={`Downvote reason for answer ${entry.id}`}
+                disabled={ratingBusy === entry.id} value={ratings[entry.id]?.reason ?? ''}
+                onChange={e => void setDownvoteReason(entry.id, (e.target.value || null) as FeedbackReason | null)}
+                className="max-w-48 min-w-0 rounded-lg border border-slate-200 bg-white p-1.5 text-slate-700">
+                <option value="">Choose reason (optional)</option>
+                <option value="incorrect">Incorrect</option><option value="incomplete">Incomplete</option>
+                <option value="irrelevant">Irrelevant</option><option value="outdated">Outdated</option>
+                <option value="other">Other</option>
+              </select>}
+            </div>}
             <button className="text-xs text-slate-500 hover:text-indigo-600 mt-4 flex gap-1.5 items-center" type="button" onClick={() => void navigator.clipboard.writeText(entry.answer)}><Copy size={13}/> Copy answer</button>
           </div>
         </article>)}
+        {loadingConversation && <div role="status" className="text-xs text-slate-500">Loading saved conversation…</div>}
         {busy && <div role="status" className="text-sm text-slate-500 flex items-center gap-3"><span className="spinner"/> Retrieving documents and generating answer…</div>}
         <div ref={endRef}/>
       </div>
@@ -175,7 +415,7 @@ function ChatPanel({ session, onUnauthorized }: { session: Session; onUnauthoriz
           <textarea aria-label="Ask a question" rows={2} maxLength={2000} value={question} onChange={event => setQuestion(event.target.value)}
             onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() } }}
             placeholder="Ask anything about your documents…" className="resize-none flex-1 min-w-0 py-2 px-3 outline-none text-sm text-slate-800 placeholder:text-slate-400"/>
-          <button type="submit" aria-label="Send question" disabled={busy || question.trim().length < 3} className="btn-primary h-10 w-10 !p-0 justify-center"><Send size={17}/></button>
+          <button type="submit" aria-label="Send question" disabled={busy || loadingConversation || question.trim().length < 3} className="btn-primary h-10 w-10 !p-0 justify-center"><Send size={17}/></button>
         </div>
         {error && <p role="alert" className="text-rose-600 mt-2 text-xs">{error}</p>}
         <p className="text-center text-[11px] mt-2 text-slate-400">Answers can be incorrect. Verify important claims against retrieved sources. Enter to send · Shift+Enter for new line.</p>
@@ -184,6 +424,7 @@ function ChatPanel({ session, onUnauthorized }: { session: Session; onUnauthoriz
     {pdfView && <PdfViewer apiKey={session.key} documentId={pdfView.documentId}
       title={pdfView.title} page={pdfView.page} onClose={closePdf}
       onUnauthorized={onUnauthorized}/>}
+    </div>
   </div>
 }
 
@@ -360,7 +601,10 @@ export default function App() {
     const identity = await api.me(key)
     setSession({ key, identity }); setAuthMessage(''); setTab('chat')
   }
-  const logout = useCallback(() => { setSession(null); setTab('chat'); setNavOpen(false) }, [])
+  const logout = useCallback(() => {
+    if (session?.key.startsWith('rags_')) void api.logout(session.key).catch(() => {})
+    setSession(null); setTab('chat'); setNavOpen(false)
+  }, [session])
   const onUnauthorized = useCallback(() => { logout(); setAuthMessage('Key is invalid or revoked. Please sign in again.') }, [logout])
 
   if (!session) return <><SignIn onLogin={login}/>{authMessage && <div role="alert" className="fixed bottom-5 right-5 rounded-lg bg-rose-100 p-3 text-rose-800 text-sm shadow-lg">{authMessage}</div>}</>
@@ -370,7 +614,15 @@ export default function App() {
     <aside className={`sidebar ${navOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0`}>
       <div className="p-6"><Brand/></div>
       <nav className="mt-4 px-3 space-y-1" aria-label="Main navigation">
-        {([{ key: 'chat', title: 'Assistant', icon: MessageSquareText }, { key: 'documents', title: 'Documents', icon: FolderOpen }] as const).map(item => {
+        {([
+          ...(session.identity.role === 'admin' ? [
+            { key: 'dashboard' as const, title: 'Dashboard', icon: LayoutDashboard },
+            { key: 'users' as const, title: 'User Management', icon: UserCog },
+          ] : []),
+          { key: 'chat' as const, title: 'Assistant', icon: MessageSquareText },
+          { key: 'documents' as const, title: 'Documents', icon: FolderOpen },
+          { key: 'knowledge-bases' as const, title: 'Knowledge Bases', icon: BookOpen },
+        ]).map(item => {
           const Icon = item.icon
           return <button key={item.key} onClick={() => { setTab(item.key); setNavOpen(false) }} aria-current={tab === item.key ? 'page' : undefined}
             className={`nav-link ${tab === item.key ? 'nav-link-active' : ''}`} type="button"><Icon size={18}/>{item.title}</button>
@@ -391,6 +643,9 @@ export default function App() {
         <ChatPanel session={session} onUnauthorized={onUnauthorized}/>
       </div>
       {tab === 'documents' && <DocumentsPanel session={session} onUnauthorized={onUnauthorized}/>}
+      {tab === 'knowledge-bases' && <KnowledgeBasesPanel session={session} onUnauthorized={onUnauthorized}/> }
+      {tab === 'dashboard' && session.identity.role === 'admin' && <DashboardPanel apiKey={session.key} onUnauthorized={onUnauthorized}/>}
+      {tab === 'users' && session.identity.role === 'admin' && <UserManagementPanel apiKey={session.key} onUnauthorized={onUnauthorized} selfUserId={session.identity.user_id}/>}
     </main>
   </div>
 }

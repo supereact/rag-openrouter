@@ -8,14 +8,17 @@ from contextlib import asynccontextmanager
 
 import psycopg
 from fastapi import FastAPI, HTTPException, File, UploadFile, Depends, Response, Request
+from fastapi.security import HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse
 
 from app.db import db_connection
 from app.ingestion_jobs import queue_upload, list_jobs, get_job, job_health
 from app.model_warmup import warmup_local_models
-from app.observability import measure, reset_llm_usage, save_request_usage, snapshot
+from app.observability import measure, reset_llm_usage, save_request_usage, snapshot, peek_llm_usage
 from app.original_pdfs import store_pdf, remove_pdf, authorized_pdf
-from app.security import Principal, require_principal, require_editor
+from app.security import Principal, require_principal, require_editor, bearer
+from app import account_auth, settings, usage_ledger, credit_budgets, conversations, knowledge_bases, answer_feedback
 from app.file_ingestion import MAX_FILE_BYTES, extract_document, extract_pdf_pages
 from app.schemas import (
     AskResponse, IngestRequest, IngestResponse, SearchRequest, SearchResponse,
@@ -91,23 +94,58 @@ def add_document(body: IngestRequest, principal: Principal = Depends(require_edi
 
 @app.post("/search", response_model=SearchResponse)
 def search(body: SearchRequest, principal: Principal = Depends(require_principal)):
+    scope = ({'knowledge_base_id': body.knowledge_base_id}
+             if body.knowledge_base_id is not None else {})
     with measure(principal.tenant_id, "search", "retrieval"):
-        hits = search_documents(body.question, body.top_k, principal=principal)
+        hits = search_documents(body.question, body.top_k, principal=principal, **scope)
     return SearchResponse(question=body.question, hits=hits)
 
 
 @app.post("/ask", response_model=AskResponse)
 def ask(body: SearchRequest, principal: Principal = Depends(require_principal)):
-    with measure(principal.tenant_id, "ask", "retrieval"):
-        hits = search_documents(body.question, body.top_k, principal=principal)
+    return _run_ask(body, principal)
+
+
+def _run_ask(body: SearchRequest, principal: Principal) -> AskResponse:
+    if body.knowledge_base_id is not None:
+        # Prevent spending any budget on a non-existent or foreign collection.
+        knowledge_bases.assert_tenant_collection(principal, body.knowledge_base_id)
+    # Acquire the database-backed allowance BEFORE contacting OpenRouter.
+    # This serializes concurrent budget checks across server processes.
+    reservation = None
+    if settings.LLM_PROVIDER == 'openrouter':
+        reservation = credit_budgets.reserve_request(principal)
     reset_llm_usage()
+    generation_attempted = False
     try:
+        scope = ({'knowledge_base_id': body.knowledge_base_id}
+                 if body.knowledge_base_id is not None else {})
+        with measure(principal.tenant_id, "ask", "retrieval"):
+            hits = search_documents(body.question, body.top_k, principal=principal, **scope)
         with measure(principal.tenant_id, "ask", "generation"):
+            generation_attempted = True
             answer = answer_question(body.question, hits)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     finally:
-        save_request_usage(principal.tenant_id)
+        # Reservations also settle on failed requests. If provider cost was
+        # unreported, the allowance stays held for operator review.
+        try:
+            usage = peek_llm_usage()
+            if settings.LLM_PROVIDER == 'openrouter':
+                try:
+                    if reservation is not None and not generation_attempted:
+                        credit_budgets.release_before_generation(reservation, principal)
+                    elif reservation is not None:
+                        credit_budgets.settle_request(reservation, principal, settings.OPENROUTER_MODEL, usage)
+                    elif usage:
+                        usage_ledger.record_openrouter_usage(principal, settings.OPENROUTER_MODEL, usage)
+                except Exception:
+                    # A failed settlement leaves its reservation held; do not
+                    # silently release credit or leak prompts into application logs.
+                    _http_logger.error('OpenRouter accounting settlement failed; check credit reservations')
+        finally:
+            save_request_usage(principal.tenant_id)
     return AskResponse(question=body.question, answer=answer, sources=hits)
 
 
@@ -255,3 +293,284 @@ def observability(principal: Principal = Depends(require_principal)):
     if principal.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return snapshot(principal.tenant_id)
+
+
+# M10: email/password accounts and tenant-scoped administration.
+# All public registration requires an email-bound invitation from an admin.
+class LoginBody(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=512)
+
+
+class RegisterBody(LoginBody):
+    invitation_code: str = Field(min_length=35, max_length=256)
+    username: str = Field(min_length=2, max_length=80)
+
+
+class InviteBody(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    role: str = Field(pattern='^(reader|editor)$')
+
+
+class UserUpdateBody(BaseModel):
+    role: str | None = Field(default=None, pattern='^(reader|editor|admin)$')
+    is_active: bool | None = None
+
+
+@app.post('/auth/login')
+def password_login(body: LoginBody, request: Request):
+    ip = request.client.host if request.client else 'unknown'
+    return account_auth.login(body.email, body.password, ip)
+
+
+@app.post('/auth/register', status_code=201)
+def password_register(body: RegisterBody):
+    try:
+        return account_auth.register(body.invitation_code, body.email,
+                                     body.username, body.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post('/auth/logout', status_code=204)
+def password_logout(principal: Principal = Depends(require_principal),
+                    credentials: HTTPAuthorizationCredentials | None = Depends(bearer)):
+    if credentials:
+        account_auth.logout(credentials.credentials)
+    return Response(status_code=204)
+
+
+@app.get('/admin/dashboard')
+def admin_dashboard(principal: Principal = Depends(require_principal)):
+    return account_auth.dashboard(principal)
+
+
+@app.get('/admin/users')
+def admin_users(principal: Principal = Depends(require_principal)):
+    return {'users': account_auth.list_users(principal)}
+
+
+@app.patch('/admin/users/{user_id}')
+def admin_change_user(user_id: int, body: UserUpdateBody,
+                      principal: Principal = Depends(require_principal)):
+    try:
+        return account_auth.update_user(principal, user_id, body.role, body.is_active)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post('/admin/users/{user_id}/revoke-sessions', status_code=204)
+def admin_revoke_sessions(user_id: int, principal: Principal = Depends(require_principal)):
+    account_auth.revoke_sessions(principal, user_id)
+    return Response(status_code=204)
+
+
+@app.get('/admin/invitations')
+def admin_list_invitations(principal: Principal = Depends(require_principal)):
+    return {'invitations': account_auth.list_invitations(principal)}
+
+
+@app.post('/admin/invitations', status_code=201)
+def admin_invite(body: InviteBody, principal: Principal = Depends(require_principal)):
+    try:
+        return account_auth.invitation(principal, body.email, body.role)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get('/admin/usage')
+def admin_usage(days: int = 30, principal: Principal = Depends(require_principal)):
+    """Admin-only OpenRouter credits by user and date, scoped to one tenant."""
+    if days not in (7, 30):
+        raise HTTPException(status_code=422, detail='days must be 7 or 30')
+    return usage_ledger.get_usage_dashboard(principal, days=days)
+
+
+# M10.2: tenant- and user-scoped monthly OpenRouter credit guardrails.
+class TenantBudgetBody(BaseModel):
+    monthly_limit_credits: str | None = None
+    paused: bool = False
+    reservation_credits: str = '0.01'
+
+
+class UserBudgetBody(BaseModel):
+    monthly_limit_credits: str | None = None
+    paused: bool = False
+
+
+@app.get('/admin/budgets')
+def admin_budgets(principal: Principal = Depends(require_principal)):
+    return credit_budgets.get_budget_dashboard(principal)
+
+
+@app.put('/admin/budgets/tenant')
+def admin_set_tenant_budget(body: TenantBudgetBody,
+                            principal: Principal = Depends(require_principal)):
+    try:
+        credit_budgets.update_tenant_budget(principal, body.monthly_limit_credits,
+                                            body.paused, body.reservation_credits)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return credit_budgets.get_budget_dashboard(principal)
+
+
+@app.put('/admin/budgets/users/{user_id}')
+def admin_set_user_budget(user_id: int, body: UserBudgetBody,
+                          principal: Principal = Depends(require_principal)):
+    try:
+        credit_budgets.update_user_budget(principal, user_id,
+                                          body.monthly_limit_credits, body.paused)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return credit_budgets.get_budget_dashboard(principal)
+
+
+# M10.3: persistent, private conversation history. Existing /ask remains unchanged.
+class ConversationCreateBody(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+
+class ConversationRenameBody(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+
+@app.get('/conversations')
+def get_saved_conversations(principal: Principal = Depends(require_principal)):
+    return {'conversations': conversations.list_conversations(principal)}
+
+
+@app.post('/conversations', status_code=201)
+def new_conversation(body: ConversationCreateBody,
+                     principal: Principal = Depends(require_principal)):
+    try:
+        return conversations.create_conversation(principal, body.title)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get('/conversations/{conversation_id}')
+def read_conversation(conversation_id: int,
+                      principal: Principal = Depends(require_principal)):
+    return conversations.get_conversation(principal, conversation_id)
+
+
+@app.patch('/conversations/{conversation_id}')
+def rename_saved_conversation(conversation_id: int, body: ConversationRenameBody,
+                              principal: Principal = Depends(require_principal)):
+    try:
+        return conversations.rename_conversation(principal, conversation_id, body.title)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.delete('/conversations/{conversation_id}', status_code=204)
+def remove_saved_conversation(conversation_id: int,
+                              principal: Principal = Depends(require_principal)):
+    conversations.delete_conversation(principal, conversation_id)
+    return Response(status_code=204)
+
+
+@app.post('/conversations/{conversation_id}/ask')
+def ask_in_conversation(conversation_id: int, body: SearchRequest,
+                        principal: Principal = Depends(require_principal)):
+    # Fail closed before any model call or paid budget reservation.
+    conversations.assert_owned(principal, conversation_id)
+    result = _run_ask(body, principal)
+    message_id = conversations.append_exchange(
+        principal, conversation_id, result.question, result.answer, result.sources)
+    return {**result.model_dump(mode='json'), 'message_id': message_id}
+
+
+# M10.4: tenant-scoped knowledge bases. Membership never grants document access.
+class KnowledgeBaseBody(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default='', max_length=500)
+
+
+@app.get('/knowledge-bases')
+def list_knowledge_bases(principal: Principal = Depends(require_principal)):
+    return {'knowledge_bases': knowledge_bases.list_bases(principal)}
+
+
+@app.post('/knowledge-bases', status_code=201)
+def create_knowledge_base(body: KnowledgeBaseBody,
+                          principal: Principal = Depends(require_principal)):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail='Name cannot be blank')
+    return knowledge_bases.create_base(principal, name, body.description.strip())
+
+
+@app.patch('/knowledge-bases/{knowledge_base_id}')
+def update_knowledge_base(knowledge_base_id: int, body: KnowledgeBaseBody,
+                          principal: Principal = Depends(require_principal)):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail='Name cannot be blank')
+    return knowledge_bases.rename_base(principal, knowledge_base_id, name, body.description.strip())
+
+
+@app.delete('/knowledge-bases/{knowledge_base_id}', status_code=204)
+def delete_knowledge_base(knowledge_base_id: int,
+                          principal: Principal = Depends(require_principal)):
+    knowledge_bases.delete_base(principal, knowledge_base_id)
+    return Response(status_code=204)
+
+
+@app.get('/knowledge-bases/{knowledge_base_id}/documents')
+def get_knowledge_base_documents(knowledge_base_id: int,
+                                 principal: Principal = Depends(require_principal)):
+    return {'documents': knowledge_bases.list_base_documents(principal, knowledge_base_id)}
+
+
+@app.put('/knowledge-bases/{knowledge_base_id}/documents/{document_id}', status_code=204)
+def add_knowledge_base_document(knowledge_base_id: int, document_id: int,
+                                principal: Principal = Depends(require_principal)):
+    knowledge_bases.add_document(principal, knowledge_base_id, document_id)
+    return Response(status_code=204)
+
+
+@app.delete('/knowledge-bases/{knowledge_base_id}/documents/{document_id}', status_code=204)
+def remove_knowledge_base_document(knowledge_base_id: int, document_id: int,
+                                   principal: Principal = Depends(require_principal)):
+    knowledge_bases.remove_document(principal, knowledge_base_id, document_id)
+    return Response(status_code=204)
+
+
+# M10.5: private answer ratings and admin-only aggregate quality signals.
+class AnswerFeedbackBody(BaseModel):
+    rating: str = Field(pattern='^(up|down)$')
+    reason: str | None = Field(default=None,
+        pattern='^(incorrect|incomplete|irrelevant|outdated|other)$')
+
+
+@app.get('/conversations/{conversation_id}/feedback')
+def saved_answer_feedback(conversation_id: int,
+                          principal: Principal = Depends(require_principal)):
+    return {'feedback': answer_feedback.list_feedback(principal,conversation_id)}
+
+
+@app.put('/conversations/{conversation_id}/messages/{message_id}/feedback')
+def rate_saved_answer(conversation_id: int, message_id: int, body: AnswerFeedbackBody,
+                      principal: Principal = Depends(require_principal)):
+    try:
+        return answer_feedback.save_feedback(principal,conversation_id,message_id,
+                                             body.rating,body.reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=422,detail=str(exc)) from exc
+
+
+@app.delete('/conversations/{conversation_id}/messages/{message_id}/feedback',status_code=204)
+def unrate_saved_answer(conversation_id: int,message_id: int,
+                        principal: Principal = Depends(require_principal)):
+    answer_feedback.remove_feedback(principal,conversation_id,message_id)
+    return Response(status_code=204)
+
+
+@app.get('/admin/feedback')
+def admin_feedback_quality(days: int = 30,
+                           principal: Principal = Depends(require_principal)):
+    try:
+        return answer_feedback.admin_quality(principal,days)
+    except ValueError as exc:
+        raise HTTPException(status_code=422,detail=str(exc)) from exc

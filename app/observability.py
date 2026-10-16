@@ -134,6 +134,12 @@ def capture_llm_usage(usage: object, *, provider: str) -> None:
     _last_usage.set(data)
 
 
+def peek_llm_usage() -> dict[str, float | int] | None:
+    """Read aggregate usage before save_request_usage consumes the context."""
+    data = _last_usage.get()
+    return dict(data) if data is not None else None
+
+
 def save_request_usage(tenant_id: int) -> None:
     """Add usage to the already-measured ask/generation row, if provided."""
     usage = _last_usage.get()

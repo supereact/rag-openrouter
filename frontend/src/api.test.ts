@@ -4,6 +4,18 @@ import { ApiError, api } from './api'
 afterEach(() => vi.unstubAllGlobals())
 
 describe('browser API client', () => {
+  it('password login sends no Authorization header and never persists a token', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      access_token:'rags_test',token_type:'bearer',expires_in:43200,
+    }), {status:200,headers:{'Content-Type':'application/json'}}))
+    vi.stubGlobal('fetch',fetchMock)
+    await expect(api.loginPassword('person@example.org','my strong passphrase')).resolves.toHaveProperty('access_token','rags_test')
+    const [url,opts] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/auth/login')
+    expect(opts.headers.Authorization).toBeUndefined()
+    expect(JSON.parse(opts.body)).toEqual({email:'person@example.org',password:'my strong passphrase'})
+  })
+
   it('sends bearer key to same-origin proxied path', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       user_id: 1, tenant_id: 2, username: 'admin', role: 'admin',
@@ -63,5 +75,29 @@ describe('browser API client', () => {
   it('gives a useful network error', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')))
     await expect(api.me('secret')).rejects.toBeInstanceOf(ApiError)
+  })
+})
+
+describe('knowledge-base API (M10.4)', () => {
+  it('sends the selected knowledge base in the saved-chat request', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      question: 'What is the backup policy?', answer: 'Backups are daily', sources: [], message_id: 12,
+    }), {status: 200, headers: {'Content-Type':'application/json'}}))
+    vi.stubGlobal('fetch', fetchMock)
+    await api.askConversation('rag_test_key', 42, 'What is the backup policy?', 5, 17)
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/conversations/42/ask')
+    expect(JSON.parse(options.body).knowledge_base_id).toBe(17)
+    expect((options.headers as Headers).get('Authorization')).toBe('Bearer rag_test_key')
+  })
+
+  it('uses protected same-origin endpoints for collection memberships', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, {status: 204}))
+    vi.stubGlobal('fetch', fetchMock)
+    await api.addKnowledgeBaseDocument('rag_test_key', 3, 8)
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/knowledge-bases/3/documents/8')
+    expect(options.method).toBe('PUT')
+    expect((options.headers as Headers).get('Authorization')).toBe('Bearer rag_test_key')
   })
 })

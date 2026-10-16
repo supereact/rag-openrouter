@@ -133,6 +133,7 @@ def test_metrics_api_tenant_boundary_and_request_id(monkeypatch, client):
 
 def test_search_ask_telemetry_without_real_db_or_llm(monkeypatch, client):
     main.app.dependency_overrides[security.require_principal] = lambda: ADMIN_A
+    monkeypatch.setattr(main.credit_budgets, "reserve_request", lambda principal: None)
     monkeypatch.setattr(main, "search_documents", lambda question, top_k, principal: [])
     monkeypatch.setattr(main, "answer_question", lambda question, hits: "No sources")
     query = {"question": "secret question: do not log", "top_k": 3}
@@ -148,6 +149,7 @@ def test_search_ask_telemetry_without_real_db_or_llm(monkeypatch, client):
 
 def test_ask_generation_failure_count(monkeypatch, client):
     main.app.dependency_overrides[security.require_principal] = lambda: ADMIN_A
+    monkeypatch.setattr(main.credit_budgets, "reserve_request", lambda principal: None)
     monkeypatch.setattr(main, "search_documents", lambda question, top_k, principal: [])
     def broken(question, hits):
         raise RuntimeError("provider unavailable")

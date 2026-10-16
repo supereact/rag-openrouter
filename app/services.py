@@ -241,7 +241,7 @@ def _cross_encoder_rerank(question: str, candidates: list[Candidate]) -> list[Ca
 
 def search_documents(
     question: str, top_k: int = 3, mode: str | None = None,
-    *, principal: Principal,
+    *, principal: Principal, knowledge_base_id: int | None = None,
 ) -> list[SearchHit]:
     """Retrieve chunks using vector, hybrid (RRF), or hybrid + reranking.
 
@@ -259,6 +259,16 @@ def search_documents(
     pool_size = max(40, top_k * 5) if selected_mode != "vector" else top_k
     if not isinstance(principal, Principal):
         raise PermissionError("Authenticated principal required")
+    if knowledge_base_id is not None:
+        # Check tenant ownership before expensive embedding or reranking work.
+        from app.knowledge_bases import assert_tenant_collection
+        assert_tenant_collection(principal, knowledge_base_id)
+    # The collection filter is applied to BOTH ranking branches, and the
+    # original document ACL is always enforced. Never filter after reranking.
+    kb_where = (" AND EXISTS (SELECT 1 FROM knowledge_base_documents kbd "
+                "WHERE kbd.knowledge_base_id=%s AND kbd.document_id=d.id "
+                "AND kbd.tenant_id=d.tenant_id)") if knowledge_base_id is not None else ""
+    kb_args = (knowledge_base_id,) if knowledge_base_id is not None else ()
     embedding = embed_many([question])[0]
     select_columns = """c.id, d.id, d.title, c.chunk_index, c.content,
                         c.page_number, 1 - (c.embedding <=> %s) AS similarity"""
@@ -268,10 +278,10 @@ def search_documents(
             f"""SELECT {select_columns}
                 FROM chunks c
                 JOIN documents d ON d.id = c.document_id
-                WHERE {ACCESS_SQL}
+                WHERE {ACCESS_SQL}{kb_where}
                 ORDER BY c.embedding <=> %s
                 LIMIT %s""",
-            (embedding, *access_args(principal), embedding, pool_size),
+            (embedding, *access_args(principal), *kb_args, embedding, pool_size),
         ).fetchall()
 
         vector_candidates = [row_to_candidate(row) for row in vector_rows]
@@ -288,12 +298,12 @@ def search_documents(
                     FROM chunks c
                     JOIN documents d ON d.id = c.document_id
                     CROSS JOIN q
-                    WHERE {ACCESS_SQL}
+                    WHERE {ACCESS_SQL}{kb_where}
                       AND to_tsvector('english', c.content) @@ q.tsq
                     ORDER BY ts_rank_cd(to_tsvector('english', c.content), q.tsq)
                              DESC, c.id
                     LIMIT %s""",
-                (question, embedding, *access_args(principal), pool_size),
+                (question, embedding, *access_args(principal), *kb_args, pool_size),
             ).fetchall()
             keyword_candidates = [row_to_candidate(row) for row in keyword_rows]
             ordered = reciprocal_rank_fusion(vector_candidates, keyword_candidates)

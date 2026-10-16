@@ -1,4 +1,4 @@
-import type { AskResponse, DocumentRecord, Identity, IngestResponse, IngestionJob, EnqueuedJob } from './types'
+import type { AskResponse, DocumentRecord, Identity, IngestResponse, IngestionJob, EnqueuedJob, AuthToken, AdminUser, AdminInvitation, NewInvitation, AdminDashboard, AdminUsage, AdminBudgets, Role, SavedConversation, SavedConversationDetail, KnowledgeBase, ConversationAskResponse, AnswerFeedback, AdminFeedback } from './types'
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -35,11 +35,85 @@ async function request<T>(key: string, path: string, init: RequestInit = {}): Pr
   return (await response.json()) as T
 }
 
+
+async function publicPost<T>(path: string, body: unknown): Promise<T> {
+  let response: Response
+  try {
+    response = await fetch(`/api${path}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body), cache: 'no-store',
+    })
+  } catch { throw new ApiError(0, 'Cannot reach FastAPI') }
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as {detail?: string} | null
+    throw new ApiError(response.status, typeof payload?.detail === 'string' ? payload.detail : `Request failed (${response.status})`)
+  }
+  return await response.json() as T
+}
+
 export const api = {
+  loginPassword: (email: string, password: string) => publicPost<AuthToken>('/auth/login', {email, password}),
+  register: (invitation_code: string, email: string, username: string, password: string) => publicPost<AuthToken>('/auth/register', { invitation_code, email, username, password }),
+  logout: (token: string) => request<void>(token, '/auth/logout', {method: 'POST'}),
+  adminDashboard: (token: string) => request<AdminDashboard>(token, '/admin/dashboard'),
+  adminUsage: (token: string, days: 7 | 30 = 30) => request<AdminUsage>(token, `/admin/usage?days=${days}`),
+  adminBudgets: (token: string) => request<AdminBudgets>(token, '/admin/budgets'),
+  setTenantBudget: (token: string, values: {monthly_limit_credits: string | null; paused: boolean; reservation_credits: string}) =>
+    request<AdminBudgets>(token, '/admin/budgets/tenant', {method: 'PUT', body: JSON.stringify(values)}),
+  setUserBudget: (token: string, userId: number, values: {monthly_limit_credits: string | null; paused: boolean}) =>
+    request<AdminBudgets>(token, `/admin/budgets/users/${userId}`, {method: 'PUT', body: JSON.stringify(values)}),
+  adminUsers: async (token: string) => (await request<{users: AdminUser[]}>(token, '/admin/users')).users,
+  adminInvitations: async (token: string) => (await request<{invitations: AdminInvitation[]}>(token, '/admin/invitations')).invitations,
+  adminInvite: (token: string, email: string, role: 'reader' | 'editor') => request<NewInvitation>(token, '/admin/invitations', { method: 'POST', body: JSON.stringify({email,role}) }),
+  adminUpdateUser: (token: string, userId: number, values: {role?: Role; is_active?: boolean}) => request<AdminUser>(token, `/admin/users/${userId}`, {method: 'PATCH', body: JSON.stringify(values)}),
+  adminRevokeSessions: (token: string, userId: number) => request<void>(token, `/admin/users/${userId}/revoke-sessions`, {method: 'POST'}),
+  conversationFeedback: async (key: string, conversationId: number) =>
+    (await request<{ feedback: AnswerFeedback[] }>(key, `/conversations/${conversationId}/feedback`)).feedback,
+  setAnswerFeedback: (key: string, conversationId: number, messageId: number,
+                      rating: 'up' | 'down', reason: string | null = null) =>
+    request<AnswerFeedback>(key, `/conversations/${conversationId}/messages/${messageId}/feedback`, {
+      method: 'PUT', body: JSON.stringify({rating, reason}),
+    }),
+  deleteAnswerFeedback: (key: string, conversationId: number, messageId: number) =>
+    request<void>(key, `/conversations/${conversationId}/messages/${messageId}/feedback`, {method:'DELETE'}),
+  adminFeedback: (key: string, days: 7 | 30 = 30) =>
+    request<AdminFeedback>(key, `/admin/feedback?days=${days}`),
+  conversations: async (key: string) =>
+    (await request<{ conversations: SavedConversation[] }>(key, '/conversations')).conversations,
+  conversation: (key: string, id: number) =>
+    request<SavedConversationDetail>(key, `/conversations/${id}`),
+  createConversation: (key: string, title: string) =>
+    request<SavedConversation>(key, '/conversations', { method: 'POST', body: JSON.stringify({ title }) }),
+  renameConversation: (key: string, id: number, title: string) =>
+    request<SavedConversation>(key, `/conversations/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) }),
+  deleteConversation: (key: string, id: number) =>
+    request<void>(key, `/conversations/${id}`, { method: 'DELETE' }),
+  askConversation: (key: string, id: number, question: string, topK: number, knowledgeBaseId: number | null = null) =>
+    request<ConversationAskResponse>(key, `/conversations/${id}/ask`, {
+      method: 'POST', body: JSON.stringify({ question, top_k: topK, knowledge_base_id: knowledgeBaseId }),
+    }),
+  knowledgeBases: async (key: string) =>
+    (await request<{ knowledge_bases: KnowledgeBase[] }>(key, '/knowledge-bases')).knowledge_bases,
+  createKnowledgeBase: (key: string, name: string, description = '') =>
+    request<KnowledgeBase>(key, '/knowledge-bases', {
+      method: 'POST', body: JSON.stringify({ name, description }),
+    }),
+  renameKnowledgeBase: (key: string, id: number, name: string, description: string) =>
+    request<KnowledgeBase>(key, `/knowledge-bases/${id}`, {
+      method: 'PATCH', body: JSON.stringify({ name, description }),
+    }),
+  deleteKnowledgeBase: (key: string, id: number) =>
+    request<void>(key, `/knowledge-bases/${id}`, { method: 'DELETE' }),
+  knowledgeBaseDocuments: async (key: string, id: number) =>
+    (await request<{ documents: DocumentRecord[] }>(key, `/knowledge-bases/${id}/documents`)).documents,
+  addKnowledgeBaseDocument: (key: string, id: number, documentId: number) =>
+    request<void>(key, `/knowledge-bases/${id}/documents/${documentId}`, { method: 'PUT' }),
+  removeKnowledgeBaseDocument: (key: string, id: number, documentId: number) =>
+    request<void>(key, `/knowledge-bases/${id}/documents/${documentId}`, { method: 'DELETE' }),
   me: (key: string) => request<Identity>(key, '/me'),
-  ask: (key: string, question: string, topK: number) =>
+  ask: (key: string, question: string, topK: number, knowledgeBaseId: number | null = null) =>
     request<AskResponse>(key, '/ask', {
-      method: 'POST', body: JSON.stringify({ question, top_k: topK }),
+      method: 'POST', body: JSON.stringify({ question, top_k: topK, knowledge_base_id: knowledgeBaseId }),
     }),
   documents: async (key: string) => {
     const result = await request<{ documents: DocumentRecord[] }>(key, '/documents')
