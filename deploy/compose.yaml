@@ -1,0 +1,65 @@
+# Optional deployment REHEARSAL on one Mac, not an Internet-facing production stack.
+# Reuses enterprise-rag-postgres via the manually attached external network.
+name: enterprise-rag-rehearsal
+
+x-python: &python
+  image: enterprise-rag-python:local
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile.api
+  env_file:
+    - ../.env
+  environment:
+    DATABASE_URL: ${RAG_DEPLOY_DATABASE_URL:?Configure RAG_DEPLOY_DATABASE_URL in deploy/.env.deploy}
+    RAG_INGEST_SPOOL: /data/spool
+    RAG_PDF_STORAGE_DIR: /data/pdfs
+    HF_HOME: /data/model-cache
+    HOME: /tmp
+  user: "${RAG_UID:?Set RAG_UID}:${RAG_GID:?Set RAG_GID}"
+  volumes:
+    - ../.ingestion_spool:/data/spool
+    - ../.original_pdfs:/data/pdfs
+    - ../.model_cache:/data/model-cache
+  init: true
+  restart: unless-stopped
+  networks:
+    - internal
+    - existing-db
+
+services:
+  api:
+    <<: *python
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"]
+      interval: 20s
+      timeout: 8s
+      start_period: 180s  # First-time sentence-transformer downloads may take longer
+      retries: 4
+
+  worker:
+    <<: *python
+    command: ["python", "-m", "scripts.ingestion_worker"]
+    # Deliberately one worker to avoid concurrent local-CPU model loads.
+
+  web:
+    build:
+      context: ../frontend
+      dockerfile: ../deploy/Dockerfile.web
+    image: enterprise-rag-web:local
+    ports:
+      - "127.0.0.1:${RAG_WEB_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - internal
+
+networks:
+  internal:
+  existing-db:
+    external: true
+    name: rag_shared

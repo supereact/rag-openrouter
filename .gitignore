@@ -12,3 +12,24 @@ evaluation/baseline*.json
 
 # Hybrid-search evaluation outputs
 evaluation/*-warm.json
+
+# Local database dumps and API-key notes
+backups/
+*.dump
+
+# Milestone 8 Vite frontend
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+frontend/.env*
+!frontend/.env.example
+
+# Temporary locally staged uploads for background ingestion
+.ingestion_spool/
+
+# Private originals, stored outside the database
+.original_pdfs/
+
+# Milestone 9.5 deployment rehearsal
+deploy/.env.deploy
+.model_cache/

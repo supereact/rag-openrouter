@@ -1,0 +1,10 @@
+# Only app source and requirements go to the backend Docker build.
+# Secrets, private PDFs, staging uploads, model cache and .git stay out.
+**
+!requirements.txt
+!app/
+!app/**
+!scripts/
+!scripts/**
+!sample_docs/
+!sample_docs/**
