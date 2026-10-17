@@ -52,6 +52,27 @@ class LibraryRecipient(BaseModel):
     username: str
 
 
+class AuditEvent(BaseModel):
+    id: int
+    created_at: datetime
+    user_id: int
+    username: str
+    action: str
+    document_id: int | None
+    document_title: str | None
+    result_count: int | None
+
+
+class AuditLog(BaseModel):
+    items: list[AuditEvent]
+    page: int
+    page_size: int
+    total: int
+    pages: int
+    actions: list[str]
+    users: list[LibraryRecipient]
+
+
 class LibraryRow(BaseModel):
     kind: Literal['document', 'upload']
     id: str

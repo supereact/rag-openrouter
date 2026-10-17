@@ -5,15 +5,19 @@ from time import perf_counter
 from uuid import uuid4
 from uuid import UUID
 from contextlib import asynccontextmanager
+from dataclasses import asdict
+from datetime import date
 from typing import Literal
 
 import psycopg
 from fastapi import FastAPI, HTTPException, File, UploadFile, Depends, Response, Request, Query
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from app.db import db_connection
+from app import browser_auth
+from app import audit_log
 from app.ingestion_jobs import queue_upload, list_jobs, get_job, job_health, remove_failed_job
 from app.document_library import list_library
 from app.model_warmup import warmup_local_models
@@ -24,7 +28,7 @@ from app import account_auth, settings, usage_ledger, credit_budgets, conversati
 from app.file_ingestion import MAX_FILE_BYTES, extract_document, extract_pdf_pages
 from app.schemas import (
     AskResponse, IngestRequest, IngestResponse, SearchRequest, SearchResponse,
-    ShareRequest, IngestionJob, EnqueuedJob, DocumentAccessResponse, DocumentAccessUpdate, DocumentLibrary,
+    ShareRequest, IngestionJob, EnqueuedJob, DocumentAccessResponse, DocumentAccessUpdate, DocumentLibrary, AuditLog,
 )
 from app.services import (
     ingest_document, ingest_pdf_pages, search_documents, answer_question,
@@ -380,16 +384,77 @@ def password_register(body: RegisterBody):
 
 
 @app.post('/auth/logout', status_code=204)
-def password_logout(principal: Principal = Depends(require_principal),
+def password_logout(request: Request, principal: Principal = Depends(require_principal),
                     credentials: HTTPAuthorizationCredentials | None = Depends(bearer)):
-    if credentials:
-        account_auth.logout(credentials.credentials)
-    return Response(status_code=204)
+    token = credentials.credentials if credentials else request.cookies.get(browser_auth.COOKIE_NAME, '')
+    account_auth.logout(token)
+    response = Response(status_code=204)
+    if not credentials or token == request.cookies.get(browser_auth.COOKIE_NAME):
+        browser_auth.clear_cookie(response, request)
+    return response
+
+
+@app.post('/auth/browser/login')
+def browser_login(body: LoginBody, request: Request, response: Response):
+    browser_auth.check_browser_transport(request)
+    ip = request.client.host if request.client else 'unknown'
+    result = account_auth.login(body.email, body.password, ip)
+    return browser_auth.start_session(response, request, result)
+
+
+@app.post('/auth/browser/register', status_code=201)
+def browser_register(body: RegisterBody, request: Request, response: Response):
+    browser_auth.check_browser_transport(request)
+    try:
+        result = account_auth.register(body.invitation_code, body.email,
+                                       body.username, body.password)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return browser_auth.start_session(response, request, result)
+
+
+@app.get('/auth/session')
+def browser_session(request: Request):
+    browser_auth.require_browser_request(request)
+    # Restore only the HttpOnly browser session, never a token from the URL/body.
+    from app.security import principal_from_api_key
+    token = request.cookies.get(browser_auth.COOKIE_NAME, '')
+    principal = principal_from_api_key(token) if token.startswith('rags_') else None
+    if principal is None:
+        # A delayed failed restore must never clear a newer login's cookie.
+        return JSONResponse({'detail': 'No active browser session'}, status_code=401,
+                            headers={'Cache-Control': 'no-store'})
+    return JSONResponse(asdict(principal), headers={'Cache-Control': 'no-store'})
+
+
+@app.post('/auth/browser/logout', status_code=204)
+def browser_logout(request: Request):
+    browser_auth.require_browser_request(request)
+    token = request.cookies.get(browser_auth.COOKIE_NAME, '')
+    if token.startswith('rags_'):
+        account_auth.logout(token)
+    response = Response(status_code=204)
+    browser_auth.clear_cookie(response, request)
+    return response
 
 
 @app.get('/admin/dashboard')
 def admin_dashboard(principal: Principal = Depends(require_principal)):
     return account_auth.dashboard(principal)
+
+
+@app.get('/admin/audit-log', response_model=AuditLog)
+def admin_audit_log(page: int = Query(1, ge=1), page_size: int = Query(20, ge=20, le=100),
+                    action: str = Query('', max_length=120), user_id: int | None = Query(None, ge=1),
+                    date_from: date | None = None, date_to: date | None = None,
+                    principal: Principal = Depends(require_principal)):
+    account_auth.admin_required(principal)
+    if page_size not in (20, 50, 100):
+        raise HTTPException(422, 'page_size must be 20, 50 or 100')
+    try:
+        return audit_log.list_events(principal, page, page_size, action, user_id, date_from, date_to)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.get('/admin/users')

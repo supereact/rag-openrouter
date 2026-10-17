@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useState } from 'react'
-import { FilePlus2, RefreshCw, Trash2, UploadCloud } from 'lucide-react'
+import { RefreshCw, Trash2 } from 'lucide-react'
 import { api } from './api'
 import type { Identity, LibraryRow } from './types'
 import { navigate, useLocation } from './navigation'
@@ -8,6 +8,7 @@ import PageFrame from './PageFrame'
 import Pagination from './Pagination'
 import DocumentAccessPanel from './DocumentAccessPanel'
 import PdfViewer from './PdfViewer'
+import DocumentUploads from './DocumentUploads'
 
 export default function DocumentsPanel({ session, onUnauthorized }: {
   session: { key: string; identity: Identity }; onUnauthorized: () => void
@@ -24,8 +25,8 @@ export default function DocumentsPanel({ session, onUnauthorized }: {
   if (status) query.set('status', status)
   if (fileType) query.set('file_type', fileType)
   const queryString = query.toString()
-  const loader = useCallback(() => api.library(session.key, new URLSearchParams(queryString)), [session.key, queryString])
-  const { data, error, loading, pending, stale, refresh, save } = useAdminResource(loader, onUnauthorized, 'Access denied. You cannot view this library.')
+  const loader = useCallback((signal?: AbortSignal) => api.library(session.key, new URLSearchParams(queryString), signal), [session.key, queryString])
+  const { data, error, loading, pending, stale, refresh, refreshInBackground, save } = useAdminResource(loader, onUnauthorized, 'Access denied. You cannot view this library.')
   const [notice, setNotice] = useState('')
   const [inputError, setInputError] = useState('')
   const [sharingId, setSharingId] = useState<string | null>(null)
@@ -34,11 +35,18 @@ export default function DocumentsPanel({ session, onUnauthorized }: {
   const writable = session.identity.role !== 'reader'
 
   useEffect(() => {
-    const interval = window.setInterval(() => {
-      if (document.visibilityState !== 'hidden') void refresh()
-    }, 3500)
-    return () => window.clearInterval(interval)
-  }, [refresh])
+    const poll = () => {
+      if (document.visibilityState !== 'hidden' && navigator.onLine !== false) void refreshInBackground()
+    }
+    const interval = window.setInterval(poll, 3500)
+    document.addEventListener('visibilitychange', poll)
+    window.addEventListener('online', poll)
+    return () => {
+      window.clearInterval(interval)
+      document.removeEventListener('visibilitychange', poll)
+      window.removeEventListener('online', poll)
+    }
+  }, [refreshInBackground])
   useEffect(() => { setSharingId(null) }, [queryString])
   useEffect(() => {
     if (data && data.page !== page) {
@@ -56,17 +64,6 @@ export default function DocumentsPanel({ session, onUnauthorized }: {
     }
     if (reset) next.set('page', '1')
     navigate(`/documents?${next}`)
-  }
-  async function upload(file: File | undefined) {
-    if (!file || pending) return
-    setInputError(''); setNotice('')
-    if (!/\.(txt|md|pdf)$/i.test(file.name)) { setInputError('Only .txt, .md, and .pdf files are supported.'); return }
-    if (file.size > 50 * 1024 * 1024) { setInputError('Maximum file size is 50 MB.'); return }
-    const ok = await save(async () => {
-      await api.uploadQueued(session.key, file)
-      return loader()
-    })
-    if (ok) setNotice(`${file.name} queued for background indexing.`)
   }
   async function remove(row: LibraryRow) {
     if (pending || !row.can_manage) return
@@ -92,12 +89,8 @@ export default function DocumentsPanel({ session, onUnauthorized }: {
   return <PageFrame title="Documents" subtitle="Only documents and uploads authorized for your account appear here."
     actions={<button type="button" disabled={pending} onClick={() => void refresh()} className="btn-primary"><RefreshCw size={15}/> Refresh documents</button>}>
     <div className="max-w-6xl px-4 sm:px-8 py-7 mx-auto space-y-5">
-      {writable && <section className="rounded-xl border border-indigo-200 bg-white p-5 flex flex-wrap justify-between gap-4 items-center">
-        <div><h2 className="font-semibold flex gap-2"><UploadCloud size={19}/> Add knowledge</h2>
-          <p className="text-sm text-slate-500 mt-1">PDF, Markdown or text · 50 MB per file · Private by default</p></div>
-        <label className="btn-primary">Upload document <FilePlus2 size={16}/><input aria-label="Select document to upload" type="file" accept=".txt,.md,.pdf" disabled={pending}
-          className="sr-only" onChange={e => { void upload(e.target.files?.[0]); e.target.value = '' }}/></label>
-      </section>}
+      {writable && <DocumentUploads key={`${session.key}:${session.identity.user_id}`} apiKey={session.key} disabled={pending}
+        onUnauthorized={onUnauthorized} onQueued={() => {void refreshInBackground()}}/>}
       {(error || inputError) && <p role="alert" className="notice-error">{inputError || error}{stale && ' Previously loaded documents may be out of date.'}</p>}
       {notice && <p role="status" className="notice-success">{notice}</p>}
       <div className="flex flex-wrap gap-3">
@@ -110,7 +103,9 @@ export default function DocumentsPanel({ session, onUnauthorized }: {
           <option value="">All types</option>{['pdf', 'md', 'txt'].map(s => <option key={s} value={s}>{s.toUpperCase()}</option>)}
         </select></label>
       </div>
-      {pending && <p role="status">{loading ? data ? 'Refreshing documents…' : 'Loading documents…' : 'Updating library…'}</p>}
+      <p role="status" className="min-h-6 text-sm text-slate-500">
+        {pending ? loading ? data ? 'Refreshing documents…' : 'Loading documents…' : 'Updating library…' : 'Documents update automatically.'}
+      </p>
       <div className="border border-slate-200 rounded-xl bg-white overflow-x-auto">
         <table className="management-table" aria-label="Document library"><thead><tr>{['Title', 'Date', 'Status', 'Assigned', 'Remove'].map(title => <th key={title} scope="col">{title}</th>)}</tr></thead>
           <tbody>{data?.items.map(row => <Fragment key={`${row.kind}:${row.id}`}><tr>

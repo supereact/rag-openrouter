@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import App from './App'
-import { api } from './api'
+import { api, ApiError } from './api'
 import { navigate } from './navigation'
 
 vi.mock('./api', async (importOriginal) => {
@@ -15,7 +15,8 @@ vi.mock('./api', async (importOriginal) => {
       conversations: vi.fn(), conversation: vi.fn(), createConversation: vi.fn(),
       askConversation: vi.fn(), renameConversation: vi.fn(), deleteConversation: vi.fn(),
       loginPassword: vi.fn(), register: vi.fn(), logout: vi.fn(),
-      adminDashboard: vi.fn(), adminUsage: vi.fn(), adminBudgets: vi.fn(), adminUsers: vi.fn(), adminInvitations: vi.fn(),
+      browserSession: vi.fn(), browserLogin: vi.fn(), browserRegister: vi.fn(), browserLogout: vi.fn(),
+      adminAuditLog: vi.fn(), adminDashboard: vi.fn(), adminUsage: vi.fn(), adminBudgets: vi.fn(), adminUsers: vi.fn(), adminInvitations: vi.fn(),
       adminInvite: vi.fn(), adminUpdateUser: vi.fn(), adminRevokeSessions: vi.fn(),
       knowledgeBases: vi.fn(), createKnowledgeBase: vi.fn(), renameKnowledgeBase: vi.fn(),
       deleteKnowledgeBase: vi.fn(), knowledgeBaseDocuments: vi.fn(),
@@ -40,7 +41,7 @@ const storage = {
 const account = { user_id: 2, tenant_id: 1, role: 'reader' as const, username: 'analyst' }
 
 async function login() {
-  fireEvent.click(screen.getByRole('button', {name:'API key'}))
+  fireEvent.click(await screen.findByRole('button', {name:'API key'}))
   fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'rag_dummy_key' } })
   fireEvent.click(screen.getByRole('button', { name: /connect to workspace/i }))
   await screen.findByRole('navigation', { name: 'Main navigation' })
@@ -50,6 +51,10 @@ beforeEach(() => {
   vi.clearAllMocks()
   window.history.replaceState({}, "", "/")
   vi.stubGlobal('localStorage', storage)
+  vi.mocked(api.browserSession).mockReset().mockRejectedValue(new ApiError(401, 'No session'))
+  vi.mocked(api.browserLogin).mockReset().mockResolvedValue(account)
+  vi.mocked(api.browserRegister).mockReset().mockResolvedValue(account)
+  vi.mocked(api.browserLogout).mockReset().mockResolvedValue(undefined)
   vi.mocked(api.me).mockResolvedValue(account)
   vi.mocked(api.documents).mockResolvedValue([])
   vi.mocked(api.library).mockResolvedValue({items: [], total: 0, page: 1, page_size: 20, pages: 1})
@@ -63,6 +68,7 @@ beforeEach(() => {
     updated_at: '2026-10-16T08:00:00Z',
   })
   vi.mocked(api.adminFeedback).mockResolvedValue({scope:'tenant',days:30, all_time:{total:0,up:0,down:0}, period:{total:0,up:0,down:0}, positive_rate:null, daily:[], downvote_reasons:[], recent_downvotes:[], disclaimer:'User ratings are not verified correctness.'})
+  vi.mocked(api.adminAuditLog).mockResolvedValue({items:[],total:0,page:1,page_size:20,pages:1,actions:[],users:[]})
   vi.mocked(api.adminDashboard).mockResolvedValue({
     users_total: 2, users_active: 2, documents_total: 1, jobs: {}, recent_actions: [],
   })
@@ -91,6 +97,112 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+describe('browser session restoration', () => {
+  it('restores password sign-in after a full app remount and preserves the current URL', async () => {
+    const view = render(<App/>)
+    fireEvent.click(await screen.findByRole('button',{name:'Email sign in'}))
+    fireEvent.change(screen.getByLabelText('Email address'),{target:{value:'user@example.org'}})
+    fireEvent.change(screen.getByLabelText('Password'),{target:{value:'synthetic-password'}})
+    fireEvent.click(screen.getByRole('button',{name:'Sign in'}))
+    await screen.findByRole('heading',{name:'Knowledge Assistant'})
+    fireEvent.click(screen.getByRole('link',{name:'Documents'}))
+    await screen.findByRole('heading',{name:'Documents'})
+    const destination = window.location.pathname + window.location.search
+    view.unmount()
+    vi.mocked(api.browserSession).mockResolvedValue(account)
+    render(<App/>)
+    await screen.findByRole('heading',{name:'Documents'})
+    expect(window.location.pathname + window.location.search).toBe(destination)
+    expect(api.library).toHaveBeenLastCalledWith('',new URLSearchParams('page=1&page_size=20'),expect.any(AbortSignal))
+    expect(api.me).not.toHaveBeenCalled()
+    expect(storage.setItem).not.toHaveBeenCalled()
+    expect(storage.getItem).not.toHaveBeenCalled()
+  })
+
+  it('does not render protected content or redirect while the session check is pending', async () => {
+    window.history.replaceState({},'', '/documents?q=policy')
+    let finish!: (identity:typeof account) => void
+    vi.mocked(api.browserSession).mockReturnValue(new Promise(resolve => {finish=resolve}))
+    render(<App/>)
+    expect(screen.getByText('Restoring your session…')).toBeInTheDocument()
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument()
+    expect(api.library).not.toHaveBeenCalled()
+    expect(window.location.pathname).toBe('/documents')
+    await act(async () => finish(account))
+    await screen.findByRole('heading',{name:'Documents'})
+  })
+
+  it('keeps a deep link for an expired session and retries a temporary API failure', async () => {
+    window.history.replaceState({},'', '/documents?q=policy')
+    vi.mocked(api.browserSession).mockRejectedValueOnce(new ApiError(0,'API unavailable'))
+    render(<App/>)
+    await screen.findByRole('alert')
+    expect(window.location.pathname).toBe('/documents')
+    expect(screen.queryByRole('button',{name:'Sign in'})).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button',{name:'Retry session check'}))
+    await screen.findByRole('button',{name:'API key'})
+    expect(new URLSearchParams(window.location.search).get('returnTo')).toBe('/documents?q=policy')
+  })
+
+  it('applies current roles to a restored session on admin routes', async () => {
+    window.history.replaceState({},'', '/dashboard')
+    vi.mocked(api.browserSession).mockResolvedValue(account)
+    render(<App/>)
+    await screen.findByRole('heading',{name:'Access denied'})
+    expect(api.adminDashboard).not.toHaveBeenCalled()
+  })
+
+  it('waits for logout revocation, then stays signed out after refresh', async () => {
+    vi.mocked(api.browserSession).mockResolvedValue(account)
+    let finish!: () => void
+    vi.mocked(api.browserLogout).mockReturnValueOnce(new Promise(resolve => {finish=resolve}))
+    const view = render(<App/>)
+    fireEvent.click(await screen.findByLabelText('Sign out'))
+    expect(screen.queryByRole('button',{name:'Sign in'})).not.toBeInTheDocument()
+    expect(api.browserLogout).toHaveBeenCalledOnce()
+    await act(async () => finish())
+    await screen.findByRole('button',{name:'Sign in'})
+    view.unmount()
+    vi.mocked(api.browserSession).mockRejectedValue(new ApiError(401,'No session'))
+    render(<App/>)
+    await screen.findByRole('button',{name:'Sign in'})
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument()
+  })
+
+  it('reports a failed logout and allows retry instead of claiming it succeeded', async () => {
+    vi.mocked(api.browserSession).mockResolvedValue(account)
+    vi.mocked(api.browserLogout).mockRejectedValueOnce(new ApiError(0,'API unavailable'))
+    render(<App/>)
+    fireEvent.click(await screen.findByLabelText('Sign out'))
+    await screen.findByText(/Sign out failed/)
+    expect(screen.getByRole('navigation')).toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Sign out'))
+    await screen.findByRole('button',{name:'Sign in'})
+  })
+
+  it('clears protected UI and preserves destination after revocation during use', async () => {
+    window.history.replaceState({},'', '/documents')
+    vi.mocked(api.browserSession).mockResolvedValue(account)
+    vi.mocked(api.library).mockRejectedValueOnce(new ApiError(401,'Session revoked'))
+    render(<App/>)
+    await screen.findByRole('button',{name:'Sign in'})
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+    expect(new URLSearchParams(window.location.search).get('returnTo')).toBe('/documents')
+    expect(screen.getByRole('alert')).toHaveTextContent('expired or access was revoked')
+  })
+
+  it('ignores a late restoration result after unmount', async () => {
+    let finish!: (identity:typeof account) => void
+    vi.mocked(api.browserSession).mockReturnValueOnce(new Promise(resolve => {finish=resolve}))
+    const view = render(<App/>)
+    view.unmount()
+    render(<App/>)
+    await screen.findByRole('button',{name:'Sign in'})
+    await act(async () => finish(account))
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument()
+  })
+})
+
 describe('URL navigation', () => {
   it('preserves a document deep link and filters through sign-in and refresh', async () => {
     const destination = '/documents?q=policy&status=failed&file_type=pdf&page=2&page_size=50'
@@ -105,7 +217,7 @@ describe('URL navigation', () => {
     expect(screen.getByLabelText('Filter documents')).toHaveValue('policy')
     expect(screen.getByLabelText('Document status')).toHaveValue('failed')
     expect(screen.getByLabelText('File type')).toHaveValue('pdf')
-    expect(api.library).toHaveBeenCalledWith('rag_dummy_key', new URLSearchParams('page=2&page_size=50&q=policy&status=failed&file_type=pdf'))
+    expect(api.library).toHaveBeenCalledWith('rag_dummy_key', new URLSearchParams('page=2&page_size=50&q=policy&status=failed&file_type=pdf'), expect.any(AbortSignal))
     view.unmount()
     render(<App/>)
     await screen.findByRole('button', {name:'API key'})
@@ -134,16 +246,30 @@ describe('URL navigation', () => {
     await screen.findByRole('heading', {name:'Documents'})
   })
 
-  it.each(['/dashboard', '/users'])('guards direct non-admin navigation to %s', async path => {
+  it.each(['/dashboard', '/users', '/audit-log'])('guards direct non-admin navigation to %s', async path => {
     window.history.replaceState({}, '', path)
     render(<App/>); await login()
     await screen.findByRole('heading', {name:'Access denied'})
     expect(screen.queryByRole('link', {name:'Dashboard'})).not.toBeInTheDocument()
     expect(api.adminDashboard).not.toHaveBeenCalled()
     expect(api.adminUsers).not.toHaveBeenCalled()
+    expect(api.adminAuditLog).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('link', {name:'Assistant'}))
     act(() => navigate('/users'))
     expect(screen.getByRole('heading', {name:'Access denied'})).toBeInTheDocument()
+  })
+
+  it('restores an admin audit-log deep link through sign-in and supports browser history',async () => {
+    window.history.replaceState({},'','/audit-log?action=search')
+    vi.mocked(api.me).mockResolvedValue({...account,role:'admin'})
+    render(<App/>);await login()
+    await screen.findByRole('heading',{name:'Audit Log'})
+    expect(screen.getByRole('link',{name:'Audit Log'})).toHaveAttribute('aria-current','page')
+    expect(new URLSearchParams(window.location.search).get('action')).toBe('search')
+    fireEvent.click(screen.getByRole('link',{name:'Documents'}))
+    await screen.findByRole('heading',{name:'Documents'})
+    act(() => window.history.back())
+    await screen.findByRole('heading',{name:'Audit Log'})
   })
 
   it.each(['https://outside.example/documents', '//outside.example/users', '/documents-evil', '/login', '/documents/11'])('rejects unsafe return destination %s', async destination => {
@@ -155,31 +281,31 @@ describe('URL navigation', () => {
   it('shows unknown routes without granting access or redirecting externally', async () => {
     window.history.replaceState({}, '', '/missing')
     render(<App/>)
-    expect(screen.getByRole('heading', {name:'Page not found'})).toBeInTheDocument()
+    expect(await screen.findByRole('heading', {name:'Page not found'})).toBeInTheDocument()
     fireEvent.click(screen.getByRole('link', {name:'Sign in'})); await login()
     act(() => navigate('/another-missing'))
-    expect(screen.getByRole('heading', {name:'Page not found'})).toBeInTheDocument()
+    expect(await screen.findByRole('heading', {name:'Page not found'})).toBeInTheDocument()
   })
 })
 
 describe('Milestone 8 UI', () => {
   it('supports email/password sign-in without saving session in storage', async () => {
-    vi.mocked(api.loginPassword).mockResolvedValue({access_token:'rags_example_session',token_type:'bearer',expires_in:43200})
+    vi.mocked(api.browserLogin).mockResolvedValue(account)
     render(<App />)
-    fireEvent.click(screen.getByRole('button', {name:'Email sign in'}))
+    fireEvent.click(await screen.findByRole('button', {name:'Email sign in'}))
     fireEvent.change(screen.getByLabelText('Email address'), {target:{value:'person@example.org'}})
     fireEvent.change(screen.getByLabelText('Password'), {target:{value:'test-only-password-123'}})
     fireEvent.click(screen.getByRole('button', {name:'Sign in'}))
     await screen.findByRole('heading', {name:'Knowledge Assistant'})
-    expect(api.loginPassword).toHaveBeenCalledWith('person@example.org','test-only-password-123')
-    expect(api.me).toHaveBeenCalledWith('rags_example_session')
+    expect(api.browserLogin).toHaveBeenCalledWith('person@example.org','test-only-password-123')
+    expect(api.me).not.toHaveBeenCalled()
     expect(storage.setItem).not.toHaveBeenCalled()
   })
 
   it('creates an account with an invitation code', async () => {
-    vi.mocked(api.register).mockResolvedValue({access_token:'rags_registered_session',token_type:'bearer',expires_in:43200})
+    vi.mocked(api.browserRegister).mockResolvedValue(account)
     render(<App />)
-    fireEvent.click(screen.getByRole('button', {name:'Sign up'}))
+    fireEvent.click(await screen.findByRole('button', {name:'Sign up'}))
     fireEvent.change(screen.getByLabelText('Invitation code'), {target:{value:'invite_abcdefghijklmnopqrstuvwxyz123456789'}})
     fireEvent.change(screen.getByLabelText('Username'), {target:{value:'newuser'}})
     fireEvent.change(screen.getByLabelText('Email address'), {target:{value:'newuser@example.org'}})
@@ -187,7 +313,7 @@ describe('Milestone 8 UI', () => {
     fireEvent.change(screen.getByLabelText('Confirm password'), {target:{value:'test-only-password-123'}})
     fireEvent.click(screen.getByRole('button', {name:'Create account'}))
     await screen.findByRole('heading', {name:'Knowledge Assistant'})
-    expect(api.register).toHaveBeenCalledWith(
+    expect(api.browserRegister).toHaveBeenCalledWith(
       'invite_abcdefghijklmnopqrstuvwxyz123456789','newuser@example.org','newuser','test-only-password-123',
     )
   })
@@ -204,14 +330,14 @@ describe('Milestone 8 UI', () => {
 
   it('requires sign-in and does not persist key', async () => {
     render(<App />)
-    fireEvent.click(screen.getByRole('button', {name:'API key'}))
+    fireEvent.click(await screen.findByRole('button', {name:'API key'}))
     expect(screen.getByLabelText('API key')).toHaveAttribute('type', 'password')
     await login()
     expect(api.me).toHaveBeenCalledWith('rag_dummy_key')
     expect(storage.setItem).not.toHaveBeenCalled()
     expect(storage.getItem).not.toHaveBeenCalled()
     fireEvent.click(screen.getByLabelText('Sign out'))
-    fireEvent.click(screen.getByRole('button', {name:'API key'}))
+    fireEvent.click(await screen.findByRole('button', {name:'API key'}))
     expect(screen.getByLabelText('API key')).toBeInTheDocument()
   })
 
@@ -241,7 +367,7 @@ describe('Milestone 8 UI', () => {
     await login()
     fireEvent.click(screen.getByRole('link', {name:'Documents'}))
     await screen.findByText('incident-response.pdf')
-    expect(screen.queryByText('Upload document')).not.toBeInTheDocument()
+    expect(screen.queryByText('Upload documents')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Delete incident-response.pdf')).not.toBeInTheDocument()
   })
 
@@ -250,8 +376,8 @@ describe('Milestone 8 UI', () => {
     render(<App />)
     await login()
     fireEvent.click(screen.getByRole('link', {name:'Documents'}))
-    await waitFor(() => expect(screen.getByText('Upload document')).toBeInTheDocument())
-    expect(screen.getByLabelText('Select document to upload')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText('Upload documents')).toBeInTheDocument())
+    expect(screen.getByLabelText('Select documents to upload')).toBeInTheDocument()
   })
 
   it('shows background job status to an editor', async () => {

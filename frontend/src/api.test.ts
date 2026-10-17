@@ -4,6 +4,48 @@ import { ApiError, api } from './api'
 afterEach(() => vi.unstubAllGlobals())
 
 describe('browser API client', () => {
+  it('requests audit history with filters, bearer auth and cancellation',async () => {
+    const fetchMock=vi.fn().mockResolvedValue(new Response('{}',{status:200}))
+    vi.stubGlobal('fetch',fetchMock)
+    const controller=new AbortController()
+    await api.adminAuditLog('key',new URLSearchParams('page=2&action=search&user_id=3&date_from=2026-10-16'),controller.signal)
+    const [url,options]=fetchMock.mock.calls[0]
+    expect(url).toBe('/api/admin/audit-log?page=2&action=search&user_id=3&date_from=2026-10-16')
+    expect(options.headers.get('Authorization')).toBe('Bearer key')
+    expect(options.signal).toBe(controller.signal)
+  })
+  it('passes a cancellation signal through to the library request', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}',{status:200}))
+    vi.stubGlobal('fetch',fetchMock)
+    const controller = new AbortController()
+    await api.library('key',new URLSearchParams('page=1'),controller.signal)
+    expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal)
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/documents/library?page=1')
+  })
+  it('uses same-origin cookies and CSRF headers without exposing a session token', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({
+      user_id:2,tenant_id:7,username:'writer',role:'editor',
+    }), {status:200}))
+    vi.stubGlobal('fetch',fetchMock)
+    await api.browserLogin('user@example.org','synthetic-password')
+    await api.browserSession()
+    await api.documents('')
+    await api.pdf('',11)
+    await api.browserRegister('invite_synthetic','user@example.org','writer','synthetic-password')
+    fetchMock.mockResolvedValueOnce(new Response(null,{status:204}))
+    await api.browserLogout()
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      '/api/auth/browser/login','/api/auth/session','/api/documents',
+      '/api/documents/11/original-pdf','/api/auth/browser/register','/api/auth/browser/logout',
+    ])
+    for (const [,options] of fetchMock.mock.calls) {
+      expect(options.credentials).toBe('same-origin')
+      expect(new Headers(options.headers).has('Authorization')).toBe(false)
+    }
+    for (const index of [0,1,2,4,5]) {
+      expect(new Headers(fetchMock.mock.calls[index][1].headers).get('X-RAG-CSRF')).toBe('1')
+    }
+  })
   it('uses protected library queries, access deltas and failed-job deletion', async () => {
     const fetchMock = vi.fn().mockImplementation(async () => new Response('{}', {status:200}))
     vi.stubGlobal('fetch',fetchMock)

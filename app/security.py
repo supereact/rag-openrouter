@@ -8,10 +8,11 @@ from hashlib import sha256
 import os
 import secrets
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.db import db_connection
+from app.browser_auth import COOKIE_NAME, SAFE_METHODS, require_browser_request
 
 bearer = HTTPBearer(auto_error=False)
 
@@ -58,15 +59,25 @@ def principal_from_api_key(key: str) -> Principal | None:
 
 
 def require_principal(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
 ) -> Principal:
-    if credentials is None or credentials.scheme.lower() != "bearer":
+    # Explicit credentials always take priority; never silently fall back to a
+    # cookie when an invalid Authorization header was supplied.
+    token = credentials.credentials if credentials else None
+    if request.headers.get('authorization') is None:
+        cookie = request.cookies.get(COOKIE_NAME, '')
+        if cookie.startswith('rags_'):
+            if request.method not in SAFE_METHODS:
+                require_browser_request(request)
+            token = cookie
+    if token is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Bearer API key required",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    principal = principal_from_api_key(credentials.credentials)
+    principal = principal_from_api_key(token)
     if principal is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

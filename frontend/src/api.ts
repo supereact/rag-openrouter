@@ -1,5 +1,5 @@
 import type { AskResponse, DocumentRecord, DocumentAccess, DocumentAccessUpdate, Identity, IngestResponse, IngestionJob, EnqueuedJob, AuthToken, AdminUser, AdminInvitation, NewInvitation, AdminDashboard, AdminUsage, AdminBudgets, Role, SavedConversation, SavedConversationDetail, KnowledgeBase, ConversationAskResponse, AnswerFeedback, AdminFeedback } from './types'
-import type { DocumentLibrary } from './types'
+import type { DocumentLibrary, AuditLog } from './types'
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -11,13 +11,15 @@ export class ApiError extends Error {
 async function request<T>(key: string, path: string, init: RequestInit = {}): Promise<T> {
   // Same-origin Vite proxy: the browser never sends the key to another host.
   const headers = new Headers(init.headers)
-  headers.set('Authorization', `Bearer ${key}`)
+  // An empty key selects the server-validated HttpOnly browser session.
+  if (key) headers.set('Authorization', `Bearer ${key}`)
+  else headers.set('X-RAG-CSRF', '1')
   if (init.body && !(init.body instanceof FormData)) {
     headers.set('Content-Type', 'application/json')
   }
   let response: Response
   try {
-    response = await fetch(`/api${path}`, { ...init, headers, cache: 'no-store' })
+    response = await fetch(`/api${path}`, { ...init, headers, credentials: 'same-origin', cache: 'no-store' })
   } catch {
     throw new ApiError(0, 'Cannot reach the API. Check that FastAPI is running on port 8000.')
   }
@@ -41,8 +43,8 @@ async function publicPost<T>(path: string, body: unknown): Promise<T> {
   let response: Response
   try {
     response = await fetch(`/api${path}`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body), cache: 'no-store',
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-RAG-CSRF': '1'},
+      body: JSON.stringify(body), credentials: 'same-origin', cache: 'no-store',
     })
   } catch { throw new ApiError(0, 'Cannot reach FastAPI') }
   if (!response.ok) {
@@ -53,10 +55,17 @@ async function publicPost<T>(path: string, body: unknown): Promise<T> {
 }
 
 export const api = {
+  browserSession: () => request<Identity>('', '/auth/session'),
+  browserLogin: (email: string, password: string) => publicPost<Identity>('/auth/browser/login', {email, password}),
+  browserRegister: (invitation_code: string, email: string, username: string, password: string) =>
+    publicPost<Identity>('/auth/browser/register', {invitation_code, email, username, password}),
+  browserLogout: () => request<void>('', '/auth/browser/logout', {method: 'POST'}),
   loginPassword: (email: string, password: string) => publicPost<AuthToken>('/auth/login', {email, password}),
   register: (invitation_code: string, email: string, username: string, password: string) => publicPost<AuthToken>('/auth/register', { invitation_code, email, username, password }),
   logout: (token: string) => request<void>(token, '/auth/logout', {method: 'POST'}),
   adminDashboard: (token: string) => request<AdminDashboard>(token, '/admin/dashboard'),
+  adminAuditLog: (key: string, query: URLSearchParams, signal?: AbortSignal) =>
+    request<AuditLog>(key, `/admin/audit-log?${query}`, {signal}),
   adminUsage: (token: string, days: 7 | 30 = 30) => request<AdminUsage>(token, `/admin/usage?days=${days}`),
   adminBudgets: (token: string) => request<AdminBudgets>(token, '/admin/budgets'),
   setTenantBudget: (token: string, values: {monthly_limit_credits: string | null; paused: boolean; reservation_credits: string}) =>
@@ -120,7 +129,8 @@ export const api = {
     const result = await request<{ documents: DocumentRecord[] }>(key, '/documents')
     return result.documents
   },
-  library: (key: string, query: URLSearchParams) => request<DocumentLibrary>(key, `/documents/library?${query}`),
+  library: (key: string, query: URLSearchParams, signal?: AbortSignal) =>
+    request<DocumentLibrary>(key, `/documents/library?${query}`, {signal}),
   removeJob: (key: string, id: string) => request<void>(key, `/ingestion-jobs/${encodeURIComponent(id)}`, {method: 'DELETE'}),
   upload: (key: string, file: File) => {
     const body = new FormData()
@@ -152,7 +162,7 @@ export const api = {
   },
   pdf: async (key: string, id: number): Promise<Blob> => {
     const response = await fetch(`/api/documents/${id}/original-pdf`, {
-      headers: { Authorization: `Bearer ${key}` }, cache: 'no-store',
+      headers: key ? { Authorization: `Bearer ${key}` } : {}, credentials: 'same-origin', cache: 'no-store',
     })
     if (!response.ok) throw new ApiError(response.status,
       response.status === 404 ? 'Original PDF unavailable or not authorized' :

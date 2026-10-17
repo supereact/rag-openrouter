@@ -5,8 +5,47 @@ It demonstrates: document text → chunking → local embeddings → PostgreSQL/
 → cosine search → optional LLM response with numbered source excerpts.
 
 **Do not upload confidential documents or expose the API to the public internet.**
-This version has no authentication, multi-tenant isolation, document-level ACLs,
-malware scanning, LLM citation validation, or production observability.
+The current application includes authentication, tenant isolation, document ACLs,
+and tenant-scoped operational dashboards. Malware scanning and production
+hardening remain separate work.
+
+## Browser sign-in and refresh
+
+Email/password and invitation sign-ins use the existing revocable, 12-hour
+server sessions through a host-only HttpOnly, SameSite=Strict cookie. Refreshing
+restores the current account and role without putting a token in browser storage
+or the URL. Refresh does not extend the session. Expiry, account deactivation,
+role changes, administrator session revocation, and sign-out still apply.
+API-key sign-in remains memory-only and requires reconnecting after a refresh.
+
+The browser uses `POST /auth/browser/login`, `POST /auth/browser/register`,
+`GET /auth/session`, and `POST /auth/browser/logout`. Existing bearer login,
+registration, and API-key contracts remain available. Cookie-authenticated writes
+require the `X-RAG-CSRF: 1` header and same-origin request checks; do not enable
+credentialed cross-origin access without revisiting these protections.
+
+Cookies require HTTPS outside loopback development (`localhost`, `127.0.0.1`,
+or `::1`). Reverse proxies must preserve the original Host, including its port,
+and pass the HTTPS scheme through a correctly configured, trusted proxy chain.
+No database migration is required for cookie sessions.
+
+## Audit Log and multiple-file uploads
+
+Administrators can open **Audit Log** at `/audit-log` to browse existing tenant
+audit records with user, action, and inclusive UTC date filters. Pagination uses
+20, 50, or 100 rows; filters and pages are stored in the URL. Deleted documents
+retain their recorded identifiers. The Dashboard's latest 10 events remain
+available. `GET /admin/audit-log` is read-only and requires a tenant administrator.
+
+On Documents, writers can select multiple PDF, Markdown, and TXT files in one
+picker. Each file is validated separately (nonempty, supported extension, at most
+50 MB) and sent through the existing authenticated upload queue, one request at
+a time. An individual failure does not prevent later files from uploading;
+**Retry failed uploads** resubmits only failed files. Queued means accepted for
+background indexing; processing status appears in the document library.
+Keep Documents open until uploading finishes. Navigating away stops remaining
+uploads; already queued jobs continue. The selected-file list stays in memory
+and is cleared on refresh/sign-out. Neither feature requires a schema change.
 
 ## Requirements
 

@@ -89,6 +89,12 @@ export interface AdminDashboard {
   jobs: Record<string, number>;
   recent_actions: {action: string; username: string; created_at: string}[]
 }
+export interface AuditLog {
+  items: {id: number; created_at: string; user_id: number; username: string; action: string;
+    document_id: number | null; document_title: string | null; result_count: number | null}[]
+  page: number; page_size: number; total: number; pages: number;
+  actions: string[]; users: {id: number; username: string}[]
+}
 
 
 export interface UsageUser {

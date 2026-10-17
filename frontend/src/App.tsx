@@ -12,6 +12,7 @@ import PdfViewer from './PdfViewer'
 import { DashboardPanel, UserManagementPanel } from './AdminPanel'
 import KnowledgeBasesPanel from './KnowledgeBasesPanel'
 import DocumentsPanel from './DocumentsPanel'
+import AuditLogPanel from './AuditLogPanel'
 import PageFrame from './PageFrame'
 import { followLink, navigate, returnDestination, routes, useLocation } from './navigation'
 
@@ -34,7 +35,9 @@ function Brand({ compact = false }: { compact?: boolean }) {
   </div>
 }
 
-function SignIn({ onLogin }: { onLogin: (key: string) => Promise<void> }) {
+function SignIn({ onLogin, onBrowserLogin }: {
+  onLogin: (key: string) => Promise<void>; onBrowserLogin: (identity: Identity) => void
+}) {
   const [mode, setMode] = useState<'key' | 'password' | 'register'>('password')
   const [key, setKey] = useState('')
   const [email, setEmail] = useState('')
@@ -53,12 +56,10 @@ function SignIn({ onLogin }: { onLogin: (key: string) => Promise<void> }) {
     try {
       if (mode === 'key') await onLogin(key.trim())
       else if (mode === 'password') {
-        const result = await api.loginPassword(email, password)
-        await onLogin(result.access_token)
+        onBrowserLogin(await api.browserLogin(email, password))
       } else {
         if (password !== confirmPassword) throw new Error('Passwords do not match')
-        const result = await api.register(invitation, email, username, password)
-        await onLogin(result.access_token)
+        onBrowserLogin(await api.browserRegister(invitation, email, username, password))
       }
     } catch (err) { setError(describeError(err)) }
     finally { setBusy(false) }
@@ -113,7 +114,7 @@ function SignIn({ onLogin }: { onLogin: (key: string) => Promise<void> }) {
         </form>
         <div className="mt-7 pt-5 border-t border-white/10 flex gap-3 items-start text-slate-400 text-xs leading-5">
           <ShieldCheck size={18} className="shrink-0 text-teal-300"/>
-          Credentials are sent to your local FastAPI service. Access tokens are kept in this tab's memory and cleared on refresh or sign out.
+          Password sign-in uses a private browser cookie and survives refresh until the session expires or is revoked. API keys stay in this tab's memory.
         </div>
       </div>
     </div>
@@ -428,38 +429,71 @@ function ChatPanel({ session, onUnauthorized }: { session: Session; onUnauthoriz
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null)
+  const [restoring, setRestoring] = useState(true)
+  const [restoreError, setRestoreError] = useState('')
+  const [restoreAttempt, setRestoreAttempt] = useState(0)
   const location = useLocation()
   const path = location.split('?')[0]
   const known = routes.some(route => route === path)
-  const adminRoute = path === '/dashboard' || path === '/users'
+  const adminRoute = path === '/dashboard' || path === '/users' || path === '/audit-log'
   const [navOpen, setNavOpen] = useState(false)
   const [authMessage, setAuthMessage] = useState('')
+
+  useEffect(() => {
+    let active = true
+    setRestoring(true); setRestoreError('')
+    api.browserSession().then(identity => {
+      if (active) setSession({key: '', identity})
+    }).catch(err => {
+      if (active && !(err instanceof ApiError && err.status === 401)) setRestoreError(describeError(err))
+    }).finally(() => { if (active) setRestoring(false) })
+    return () => { active = false }
+  }, [restoreAttempt])
+
+  function browserLogin(identity: Identity) {
+    setSession({key: '', identity}); setAuthMessage('')
+    navigate(returnDestination(new URLSearchParams(window.location.search).get('returnTo')), true)
+  }
 
   async function login(key: string) {
     const identity = await api.me(key)
     setSession({ key, identity }); setAuthMessage('')
     navigate(returnDestination(new URLSearchParams(window.location.search).get('returnTo')), true)
   }
-  const logout = useCallback(() => {
-    if (session?.key.startsWith('rags_')) void api.logout(session.key).catch(() => {})
+  const logout = useCallback(async () => {
+    // Confirm server revocation before showing sign-in: otherwise a failed
+    // logout would silently sign the same cookie back in on the next refresh.
+    try {
+      if (session?.key === '') await api.browserLogout()
+      else if (session?.key.startsWith('rags_')) await api.logout(session.key)
+    } catch (err) {
+      if (!(err instanceof ApiError && err.status === 401)) { setAuthMessage(`Sign out failed. ${describeError(err)}`); return }
+    }
     setSession(null); setNavOpen(false)
     navigate('/login', true)
   }, [session])
   const onUnauthorized = useCallback(() => {
     const destination = returnDestination(window.location.pathname + window.location.search)
-    logout(); navigate(`/login?${new URLSearchParams({returnTo: destination})}`, true)
-    setAuthMessage('Key is invalid or revoked. Please sign in again.')
-  }, [logout])
+    setSession(null); setNavOpen(false)
+    navigate(`/login?${new URLSearchParams({returnTo: destination})}`, true)
+    setAuthMessage('Your session expired or access was revoked. Please sign in again.')
+  }, [])
 
   useEffect(() => {
     setNavOpen(false)
+    if (restoring || restoreError) return
     if (path === '/') navigate(session ? '/assistant' : '/login', true)
     else if (!session && known) navigate(`/login?${new URLSearchParams({returnTo: location})}`, true)
     else if (session && path === '/login') navigate(returnDestination(new URLSearchParams(location.split('?')[1]).get('returnTo')), true)
-  }, [location, path, known, session])
+  }, [location, path, known, session, restoring, restoreError])
+
+  if (restoring || restoreError) return <div className="h-dvh overflow-auto bg-slate-50 p-8">
+    {restoring ? <p role="status">Restoring your session…</p> : <><p role="alert">Could not check your session. {restoreError}</p>
+      <button type="button" className="btn-primary mt-4" onClick={() => setRestoreAttempt(value => value + 1)}>Retry session check</button></>}
+  </div>
 
   if (!session && !known && path !== '/' && path !== '/login') return <div className="h-dvh overflow-auto p-8"><h1>Page not found</h1><a href="/login" onClick={followLink}>Sign in</a></div>
-  if (!session) return <><SignIn onLogin={login}/>{authMessage && <div role="alert" className="fixed bottom-5 right-5 rounded-lg bg-rose-100 p-3 text-rose-800 text-sm shadow-lg">{authMessage}</div>}</>
+  if (!session) return <><SignIn onLogin={login} onBrowserLogin={browserLogin}/>{authMessage && <div role="alert" className="fixed bottom-5 right-5 rounded-lg bg-rose-100 p-3 text-rose-800 text-sm shadow-lg">{authMessage}</div>}</>
 
   return <div className="flex h-dvh overflow-hidden bg-[#f6f8fc]">
     {navOpen && <button type="button" aria-label="Close navigation" onClick={() => setNavOpen(false)} className="fixed inset-0 z-20 bg-slate-950/40 md:hidden"/>}
@@ -470,6 +504,7 @@ export default function App() {
           ...(session.identity.role === 'admin' ? [
             { key: 'dashboard' as const, title: 'Dashboard', icon: LayoutDashboard },
             { key: 'users' as const, title: 'User Management', icon: UserCog },
+            { key: 'audit-log' as const, title: 'Audit Log', icon: ShieldCheck },
           ] : []),
           { key: 'assistant' as const, title: 'Assistant', icon: MessageSquareText },
           { key: 'documents' as const, title: 'Documents', icon: FolderOpen },
@@ -488,10 +523,11 @@ export default function App() {
         <div className="border-t border-white/10 pt-4 flex gap-3 items-center">
           <div className="w-9 h-9 grid place-items-center bg-indigo-500/20 text-indigo-200 rounded-full font-bold">{session.identity.username.charAt(0).toUpperCase()}</div>
           <div className="flex-1 min-w-0"><div className="text-slate-100 text-sm font-semibold truncate">{session.identity.username}</div><div className="text-xs text-slate-400 capitalize">{session.identity.role} · tenant #{session.identity.tenant_id}</div></div>
-          <button aria-label="Sign out" type="button" title="Sign out" onClick={logout} className="text-slate-400 hover:text-white"><LogOut size={19}/></button>
+          <button aria-label="Sign out" type="button" title="Sign out" onClick={() => void logout()} className="text-slate-400 hover:text-white"><LogOut size={19}/></button>
         </div>
       </div>
     </aside>
+    {authMessage && <p role="alert" className="fixed bottom-5 right-5 z-50 notice-error">{authMessage}</p>}
     <main className="flex-1 min-w-0 min-h-0 overflow-hidden flex flex-col">
       <div className="md:hidden h-14 shrink-0 border-b bg-white flex items-center px-4 gap-3"><button type="button" aria-label="Open navigation" onClick={() => setNavOpen(true)}><Menu size={22}/></button><span className="font-semibold">KnowledgeBase</span></div>
       <div className={path === '/assistant' ? 'flex-1 min-h-0' : 'hidden'}>
@@ -501,6 +537,7 @@ export default function App() {
       {path === '/knowledge-bases' && <KnowledgeBasesPanel session={session} onUnauthorized={onUnauthorized}/> }
       {path === '/dashboard' && session.identity.role === 'admin' && <DashboardPanel apiKey={session.key} onUnauthorized={onUnauthorized}/>}
       {path === '/users' && session.identity.role === 'admin' && <UserManagementPanel apiKey={session.key} onUnauthorized={onUnauthorized} selfUserId={session.identity.user_id}/>}
+      {path === '/audit-log' && session.identity.role === 'admin' && <AuditLogPanel apiKey={session.key} onUnauthorized={onUnauthorized}/>}
       {adminRoute && session.identity.role !== 'admin' && <PageFrame title="Access denied" subtitle="Administrator access is required."><p className="p-6">Choose an available page from navigation.</p></PageFrame>}
       {!known && path !== '/' && path !== '/login' && <PageFrame title="Page not found" subtitle="This page does not exist."><a href="/assistant" onClick={followLink} className="block p-6 text-indigo-700">Return to Assistant</a></PageFrame>}
     </main>
