@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import {
   ArrowRight, BookOpen, ChevronDown, ChevronRight, Copy,
   FolderOpen, KeyRound, Layers, LogOut, LockKeyhole,
@@ -15,7 +15,12 @@ import DocumentsPanel from './DocumentsPanel'
 import AuditLogPanel from './AuditLogPanel'
 import CreditsPanel from './CreditsPanel'
 import PageFrame from './PageFrame'
+import Brand from './Brand'
 import { followLink, navigate, returnDestination, routes, useLocation } from './navigation'
+
+const SupportPanel = lazy(() => import('./SupportPanel'))
+const AccountPanel = lazy(() => import('./AccountPanel'))
+const LandingPage = lazy(() => import('./LandingPage'))
 
 interface Session { key: string; identity: Identity }
 const commonQuestions = [
@@ -28,18 +33,11 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : 'Something went wrong. Please try again.'
 }
 
-function Brand({ compact = false }: { compact?: boolean }) {
-  return <div className="flex items-center gap-3">
-    <div className="brand-mark"><Layers size={19} strokeWidth={2.3} /></div>
-    {!compact && <div><div className="font-bold tracking-tight text-white leading-tight">KnowledgeBase</div>
-      <div className="text-[11px] tracking-[.14em] uppercase text-slate-400 mt-0.5">Enterprise RAG</div></div>}
-  </div>
-}
-
-function SignIn({ onLogin, onBrowserLogin }: {
+function SignIn({ onLogin, onBrowserLogin, initialMode }: {
   onLogin: (key: string) => Promise<void>; onBrowserLogin: (identity: Identity) => void
+  initialMode: 'password' | 'register'
 }) {
-  const [mode, setMode] = useState<'key' | 'password' | 'register'>('password')
+  const [mode, setMode] = useState<'key' | 'password' | 'register'>(initialMode)
   const [key, setKey] = useState('')
   const [email, setEmail] = useState('')
   const [username, setUsername] = useState('')
@@ -67,7 +65,7 @@ function SignIn({ onLogin, onBrowserLogin }: {
   }
 
   return <div className="h-dvh overflow-y-auto bg-[#080f1e] flex flex-col">
-    <div className="p-7 sm:p-10"><Brand /></div>
+    <div className="p-7 sm:p-10"><a href="/" onClick={followLink} aria-label="KnowledgeBase home"><Brand /></a></div>
     <div className="flex-1 flex items-center justify-center p-5">
       <div className="w-full max-w-[460px] rounded-2xl border border-white/10 bg-white/[.045] p-7 sm:p-9 shadow-2xl">
         <div className="w-12 h-12 grid place-items-center rounded-xl bg-indigo-500/15 text-indigo-300 mb-5"><LockKeyhole size={22}/></div>
@@ -435,6 +433,7 @@ export default function App() {
   const [restoreAttempt, setRestoreAttempt] = useState(0)
   const location = useLocation()
   const path = location.split('?')[0]
+  const signInMode = new URLSearchParams(location.split('?')[1]).get('mode') === 'register' ? 'register' : 'password'
   const known = routes.some(route => route === path)
   const adminRoute = path === '/dashboard' || path === '/users' || path === '/audit-log'
   const [navOpen, setNavOpen] = useState(false)
@@ -479,14 +478,24 @@ export default function App() {
     navigate(`/login?${new URLSearchParams({returnTo: destination})}`, true)
     setAuthMessage('Your session expired or access was revoked. Please sign in again.')
   }, [])
+  const onAccountSignedOut = useCallback((message: string) => {
+    setSession(null); setNavOpen(false)
+    navigate('/login?returnTo=%2Faccount', true)
+    setAuthMessage(message)
+  }, [])
 
   useEffect(() => {
     setNavOpen(false)
     if (restoring || restoreError) return
-    if (path === '/') navigate(session ? '/assistant' : '/login', true)
-    else if (!session && known) navigate(`/login?${new URLSearchParams({returnTo: location})}`, true)
+    if (!session && known) navigate(`/login?${new URLSearchParams({returnTo: location})}`, true)
     else if (session && path === '/login') navigate(returnDestination(new URLSearchParams(location.split('?')[1]).get('returnTo')), true)
   }, [location, path, known, session, restoring, restoreError])
+
+  // The public page remains available while session restoration is pending or fails.
+  // Its showcase uses fictional local content, never authenticated chat/PDF APIs.
+  if (path === '/') return <Suspense fallback={<div className="h-dvh overflow-auto bg-[#080d1b] p-8 text-slate-200"><p role="status">Loading KnowledgeBase…</p></div>}>
+    <LandingPage signedIn={session !== null}/>
+  </Suspense>
 
   if (restoring || restoreError) return <div className="h-dvh overflow-auto bg-slate-50 p-8">
     {restoring ? <p role="status">Restoring your session…</p> : <><p role="alert">Could not check your session. {restoreError}</p>
@@ -494,7 +503,7 @@ export default function App() {
   </div>
 
   if (!session && !known && path !== '/' && path !== '/login') return <div className="h-dvh overflow-auto p-8"><h1>Page not found</h1><a href="/login" onClick={followLink}>Sign in</a></div>
-  if (!session) return <><SignIn onLogin={login} onBrowserLogin={browserLogin}/>{authMessage && <div role="alert" className="fixed bottom-5 right-5 rounded-lg bg-rose-100 p-3 text-rose-800 text-sm shadow-lg">{authMessage}</div>}</>
+  if (!session) return <><SignIn key={signInMode} initialMode={signInMode} onLogin={login} onBrowserLogin={browserLogin}/>{authMessage && <div role="alert" className="fixed bottom-5 right-5 rounded-lg bg-rose-100 p-3 text-rose-800 text-sm shadow-lg">{authMessage}</div>}</>
 
   return <div className="flex h-dvh overflow-hidden bg-[#f6f8fc]">
     {navOpen && <button type="button" aria-label="Close navigation" onClick={() => setNavOpen(false)} className="fixed inset-0 z-20 bg-slate-950/40 md:hidden"/>}
@@ -511,6 +520,8 @@ export default function App() {
           { key: 'documents' as const, title: 'Documents', icon: FolderOpen },
           { key: 'knowledge-bases' as const, title: 'Knowledge Bases', icon: BookOpen },
           { key: 'credits' as const, title: 'Credits', icon: Wallet },
+          { key: 'support' as const, title: 'Support', icon: MessageSquareText },
+          { key: 'account' as const, title: 'Account', icon: LockKeyhole },
         ]).map(item => {
           const Icon = item.icon
           return <a key={item.key} href={`/${item.key}`} onClick={event => {
@@ -539,6 +550,14 @@ export default function App() {
       {path === '/knowledge-bases' && <KnowledgeBasesPanel session={session} onUnauthorized={onUnauthorized}/> }
       {path === '/credits' && <CreditsPanel key={`${session.identity.tenant_id}:${session.identity.user_id}:${session.key}`}
         apiKey={session.key} onUnauthorized={onUnauthorized}/>}
+      {path === '/support' && <Suspense fallback={<PageFrame title="Support" subtitle="Private chat with the support team."><p className="p-6" role="status">Loading support…</p></PageFrame>}>
+        <SupportPanel key={`${session.identity.tenant_id}:${session.identity.user_id}:${session.key}`}
+          apiKey={session.key} onUnauthorized={onUnauthorized}/>
+      </Suspense>}
+      {path === '/account' && <Suspense fallback={<PageFrame title="Account security" subtitle="Manage your password and active sign-ins."><p className="p-6" role="status">Loading account security…</p></PageFrame>}>
+        <AccountPanel key={`${session.identity.tenant_id}:${session.identity.user_id}:${session.key}`}
+          apiKey={session.key} onUnauthorized={onUnauthorized} onSignedOut={onAccountSignedOut}/>
+      </Suspense>}
       {path === '/dashboard' && session.identity.role === 'admin' && <DashboardPanel apiKey={session.key} onUnauthorized={onUnauthorized}/>}
       {path === '/users' && session.identity.role === 'admin' && <UserManagementPanel apiKey={session.key} onUnauthorized={onUnauthorized} selfUserId={session.identity.user_id}/>}
       {path === '/audit-log' && session.identity.role === 'admin' && <AuditLogPanel apiKey={session.key} onUnauthorized={onUnauthorized}/>}

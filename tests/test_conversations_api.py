@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 from fastapi import HTTPException
 from app import main, security
 from app.security import Principal
+from app.conversation_context import ConversationContext
 
 OWNER = Principal(3, 1, 'reader', 'owner')
 OUTSIDER = Principal(4, 2, 'admin', 'outside-admin')
@@ -50,7 +51,8 @@ def test_saved_chat_uses_original_budgeted_ask_path(monkeypatch):
     main.app.dependency_overrides[security.require_principal] = lambda: OWNER
     seen=[]
     monkeypatch.setattr(main.conversations,'assert_owned',lambda p,c:seen.append(('auth',p.user_id,c)))
-    monkeypatch.setattr(main,'_run_ask',lambda body,p:(seen.append(('ask',p.user_id)) or main.AskResponse(question=body.question,answer='Grounded',sources=[])))
+    monkeypatch.setattr(main.conversations,'load_context',lambda *a:ConversationContext())
+    monkeypatch.setattr(main,'_run_ask',lambda body,p,**kw:(seen.append(('ask',p.user_id)) or main.AskResponse(question=body.question,answer='Grounded',sources=[])))
     monkeypatch.setattr(main.conversations,'append_exchange',lambda p,c,q,a,s:(seen.append(('saved',p.user_id,c)) or 22))
     try:
         with _client(monkeypatch) as c:

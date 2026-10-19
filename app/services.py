@@ -347,7 +347,7 @@ def search_documents(
     ]
 
 
-def answer_question(question: str, sources: list[SearchHit]) -> str:
+def answer_question(question: str, sources: list[SearchHit], *, conversation_context: str = '') -> str:
     if not sources:
         if contains_han(question):
             # These characters are shared by Simplified and Traditional Chinese.
@@ -360,4 +360,5 @@ def answer_question(question: str, sources: list[SearchHit]) -> str:
         f"{f', PDF page {hit.page_number}' if hit.page_number is not None else ''})\n{hit.content}"
         for hit in sources
     )
-    return generate_grounded_answer(question, context)
+    args = {'conversation_context': conversation_context} if conversation_context else {}
+    return generate_grounded_answer(question, context, **args)

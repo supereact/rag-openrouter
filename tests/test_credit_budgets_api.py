@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from app import main, settings, security, services, observability
 from app.schemas import SearchHit
 from app.security import Principal
+from app.conversation_context import ConversationContext
 
 ADMIN = Principal(1,12,'admin','admin')
 READER = Principal(2,12,'reader','reader')
@@ -40,6 +41,7 @@ def ask_dependencies(monkeypatch):
     monkeypatch.setattr(main, 'search_documents', calls.search)
     monkeypatch.setattr(services, 'generate_grounded_answer', calls.provider)
     monkeypatch.setattr(main.conversations, 'assert_owned', calls.owned)
+    monkeypatch.setattr(main.conversations, 'load_context', lambda *a: ConversationContext())
     monkeypatch.setattr(main.conversations, 'append_exchange', calls.append)
     with _client(monkeypatch) as client:
         yield client, calls

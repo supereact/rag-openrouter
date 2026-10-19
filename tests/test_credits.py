@@ -556,7 +556,8 @@ def test_question_paths_preserve_wallet_usage_and_unknown_holds(state, monkeypat
         search.side_effect = RuntimeError('Synthetic retrieval failure')
     monkeypatch.setattr(main, 'search_documents', search)
     provider = Mock()
-    def answer(question, hits):
+    def answer(question, hits, **kwargs):
+        assert kwargs == ({'conversation_context': context.prompt()} if path != '/ask' else {})
         if not hits:
             return 'No indexed sources are available to answer that question.'
         provider()
@@ -567,6 +568,9 @@ def test_question_paths_preserve_wallet_usage_and_unknown_holds(state, monkeypat
         return 'Synthetic answer [1]'
     monkeypatch.setattr(main, 'answer_question', answer)
     monkeypatch.setattr(main.conversations, 'assert_owned', Mock())
+    from app.conversation_context import ConversationContext, ContextTurn
+    context = ConversationContext((ContextTurn('Earlier question?', 'Earlier answer [8]', frozenset({11})),))
+    monkeypatch.setattr(main.conversations, 'load_context', Mock(return_value=context))
     monkeypatch.setattr(main.conversations, 'append_exchange', Mock(return_value=22))
     with TestClient(main.app) as client:
         response = client.post(path, json={'question': 'Synthetic wallet question?', 'top_k': 1})

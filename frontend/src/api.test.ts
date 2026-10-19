@@ -4,6 +4,50 @@ import { ApiError, api } from './api'
 afterEach(() => vi.unstubAllGlobals())
 
 describe('browser API client', () => {
+  it('uses owner-only account endpoints and keeps credentials inside request bodies', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response('{}', {status:200}))
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+    await api.accountSessions('', 2, 50, controller.signal)
+    await api.changePassword('', 'old-test-password', 'new-test-password')
+    await api.revokeOwnSession('', 17)
+    await api.revokeOtherSessions('')
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      '/api/auth/sessions?page=2&page_size=50', '/api/auth/password',
+      '/api/auth/sessions/17', '/api/auth/sessions/revoke-others',
+    ])
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({current_password:'old-test-password',new_password:'new-test-password'})
+    expect(fetchMock.mock.calls[2][1].method).toBe('DELETE')
+    expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal)
+    for (const [url, options] of fetchMock.mock.calls) {
+      expect(url).not.toMatch(/old-test-password|new-test-password/)
+      expect(options.headers.get('X-RAG-CSRF')).toBe('1')
+      expect(options.credentials).toBe('same-origin')
+      expect(options.cache).toBe('no-store')
+    }
+  })
+  it('uses protected support endpoints with CSRF, pagination and idempotency keys', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response('{}', {status: 200}))
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+    await api.supportChats('', 2, 50, 'open', controller.signal)
+    await api.createSupportChat('', 'Help', 'Please help', 'request-key')
+    await api.supportMessages('', 4, 12, controller.signal)
+    await api.sendSupportMessage('', 4, 'Reply', 'message-key')
+    await api.setSupportStatus('', 4, 'closed')
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      '/api/support/chats?page=2&page_size=50&status=open', '/api/support/chats',
+      '/api/support/chats/4/messages?after_id=12', '/api/support/chats/4/messages', '/api/support/chats/4',
+    ])
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({subject:'Help',body:'Please help',request_key:'request-key'})
+    expect(JSON.parse(fetchMock.mock.calls[3][1].body)).toEqual({body:'Reply',request_key:'message-key'})
+    for (const [, options] of fetchMock.mock.calls) {
+      expect(options.headers.get('X-RAG-CSRF')).toBe('1')
+      expect(options.headers.has('Authorization')).toBe(false)
+      expect(options.credentials).toBe('same-origin')
+      expect(options.cache).toBe('no-store')
+    }
+  })
   it('uses private credits endpoints, CSRF and a stable checkout key', async () => {
     const fetchMock = vi.fn().mockImplementation(async () => new Response('{}', {status: 200}))
     vi.stubGlobal('fetch', fetchMock)

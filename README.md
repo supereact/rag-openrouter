@@ -28,6 +28,7 @@ are implemented, but they do not constitute a production security assessment.
 - [Usage and credit budgets](#usage-and-credit-budgets)
 - [Personal credits and USDT payments](#personal-credits-and-usdt-payments)
 - [Saved conversations](#saved-conversations)
+- [Live support](#live-support)
 - [Knowledge bases](#knowledge-bases)
 - [Answer feedback](#answer-feedback)
 - [Audit log and observability](#audit-log-and-observability)
@@ -188,6 +189,7 @@ python -m scripts.migrate_credits
 python -m scripts.migrate_conversations
 python -m scripts.migrate_knowledge_bases
 python -m scripts.migrate_answer_feedback
+python -m scripts.migrate_support
 ```
 
 | Script | Schema purpose and upgrade considerations |
@@ -202,6 +204,7 @@ python -m scripts.migrate_answer_feedback
 | `migrate_conversations` | Private conversations and saved message/source snapshots. |
 | `migrate_knowledge_bases` | Collections and memberships, with composite foreign keys enforcing tenant consistency. |
 | `migrate_answer_feedback` | One current rating per saved assistant message, linked to its conversation. |
+| `migrate_support` | Private support threads/messages with owner constraints and idempotency keys. Optional feature; no staff account is enabled by the migration. |
 
 Do not apply old milestone patch files over the current code. A database upgrade
 does not automatically reindex existing documents, reconstruct missing original
@@ -268,6 +271,7 @@ consistent settings in API, worker, and maintenance terminals.
 | `RAG_PAYMENTS_CALLBACK_BASE_URL` | Public HTTPS base URL, including `/api` when callbacks pass through the web proxy. Never inferred from a client-supplied Host header. |
 | `NOWPAYMENTS_SANDBOX_API_KEY`, `NOWPAYMENTS_SANDBOX_IPN_SECRET` | Private sandbox provider credentials. |
 | `NOWPAYMENTS_API_KEY`, `NOWPAYMENTS_IPN_SECRET` | Separate live credentials; configure after merchant eligibility is confirmed. |
+| `RAG_SUPPORT_STAFF_USER_IDS` | Empty by default. Comma-separated global user IDs of designated central support administrators; only active admin accounts qualify. Restart the API after changing it. |
 
 Choose model IDs and provider permissions appropriate to your account; example
 IDs are configuration examples, not guarantees of availability or pricing.
@@ -313,6 +317,8 @@ state.
 | `/documents` | Searchable library of indexed documents and queued, processing, or failed uploads; upload files and manage permitted documents. |
 | `/knowledge-bases` | Browse/manage collections of existing authorized documents. |
 | `/credits` | Personal balance, USDT top-ups, payment status and credit history; available to every signed-in role. |
+| `/support` | Private user support chats; explicitly designated staff receive a central inbox across tenants. |
+| `/account` | Change your password, review your active password sessions, and revoke individual or other sessions. Available to every signed-in role. |
 | `/dashboard` | Admin overview, OpenRouter usage, monthly budgets, and feedback analytics. |
 | `/users` | Admin user table and invitations. |
 | `/audit-log` | Admin searchable/filterable tenant audit history. |
@@ -383,6 +389,65 @@ configuration.
 Admin safeguards prevent self-deactivation/self-demotion and removal of the
 last active admin. Deactivation preserves owned documents and history; it is
 not account deletion or ownership transfer.
+
+### Account security and session self-service
+
+Open **Account** (`/account`) to manage your own credentials and sessions. This
+uses the existing `app_users` and `login_sessions` tables: no migration or new
+configuration is required. Ordinary users, tenant administrators, and designated
+central support staff can only manage their own sessions through these endpoints.
+Existing administrator controls remain separate.
+
+The password form requires your current password, a different new password, and
+matching confirmation in the UI. The existing 12–128-character / 512-UTF-8-byte
+policy and salted password hashing apply. Initial passwords for API-key-only
+accounts still require the operator setup described above; this is not a
+forgotten-password reset flow. Incorrect current-password attempts return a form
+error without signing out the current session, and a per-account, process-local
+throttle limits repeated failures. Distributed throttling remains future work.
+
+A successful password change atomically updates the hash, revokes **all password
+sessions including the current one**, and records a metadata-only audit event.
+Password-authenticated users then sign in again using the new password. API keys
+are not revoked; an API-key connection remains active after the change. Login
+locks the account before checking its password and issuing a session, so a
+concurrent old-password login cannot create a valid session after revocation.
+Personal mutations also recheck activation and the authenticating credential
+inside their transaction, using tenant/account lock order compatible with admin
+updates. An audit failure rolls back the credential/revocation changes.
+
+Active-session reporting excludes expired/revoked rows, supports 20/50/100-row
+pagination, and identifies the authenticating password session when applicable.
+Only numeric session IDs, creation/expiry timestamps, and a current-session flag
+are returned. Tokens, token hashes, password hashes, device names, IP addresses,
+and user agents are not exposed. Device/location tracking is not implemented.
+Session reporting uses a consistent read-only snapshot.
+
+You can sign out a single session, including your own with confirmation. **Sign
+out other sessions** preserves the current password session. When connected with
+an API key, the action instead signs out all active password sessions while
+keeping the API key valid. Revoking a current cookie session clears that cookie;
+an explicitly authenticated bearer request never clears an unrelated browser
+cookie. Ownership is enforced before any target session is changed; there is no
+tenant-admin or central-support override in these self-service routes.
+
+The page refreshes every 15 seconds while visible and online and on return from
+hidden/offline states. Refreshes retain password drafts in component memory;
+passwords are never placed in URLs, persistent browser storage, or validation
+responses. Invalid security payloads receive generic validation errors to avoid
+echoing secrets. Successful changes clear the form, obsolete account responses
+are ignored, and mutation controls prevent duplicate submissions. An interrupted
+password-change response can be uncertain: try signing in with the new password
+before submitting again. Cookie writes retain the existing CSRF protections.
+
+Implementation: `app/account_security.py` (ownership, transactions and audit),
+`app/account_security_api.py` (typed routes and private validation),
+`app/account_auth.py` (serialized login), and `frontend/src/AccountPanel.tsx`
+(forms and session table), with navigation/client types wired through the
+existing app. Regression coverage is in `tests/test_account_security.py` and
+`frontend/src/AccountPanel.test.tsx`, plus existing authentication and app/API tests.
+Automated checks use temporary database fixtures and provider-free tests; they
+do not change a real user's password or revoke live sessions.
 
 ### Permission model
 
@@ -757,8 +822,28 @@ no longer accessible, the affected answer and excerpts are redacted; the
 question can remain visible. This prevents revoked sources leaking through old
 history. Deleting a conversation cascades its messages and feedback.
 
-Saved history is **not multi-turn generation memory**: a new response uses the
-current question and retrieved sources rather than the whole preceding chat.
+Saved questions use up to four recent authorized exchanges as conversational
+context: at most 500 question characters and 1,000 answer characters per exchange.
+Retrieval combines the current question with up to 1,000 characters from the
+latest authorized exchange; the single generation request receives the bounded
+window. There is no extra paid question-rewriting call. Previous answers are
+untrusted reference context, not factual evidence; only newly retrieved sources
+may support the new answer, and old citation numbers are removed from context.
+Ambiguous references should prompt clarification. Language/script follow the
+current question. This contextual retrieval is a bounded heuristic, not a
+guarantee of resolving every follow-up correctly.
+Context increases prompt size and can increase provider cost; existing wallet
+and monthly-budget reservation/settlement rules still apply.
+
+Ownership, source access, and selected knowledge-base membership are checked
+before history enters retrieval/generation. A revoked, malformed, sourceless, or
+out-of-scope exchange stops the context window from reaching older topics.
+New saved sourced answers retain private JSON metadata identifying their context
+document dependencies, including transitive dependencies. Revoking any of those
+documents redacts the derived answer/sources and hides its feedback. That metadata
+is omitted from API source objects. Existing rows remain readable without a
+schema migration; `/ask` remains stateless.
+
 The listing is capped at 100 recent conversations, and details load the latest
 100 messages; history pagination is not implemented.
 
@@ -766,6 +851,54 @@ History is not application-encrypted at rest. Apply database backup/access and
 retention policies. A provider call can incur cost before a subsequent message
 save fails; blind retries may cause another paid call. End-to-end generation
 idempotency is not implemented.
+
+## Live support
+
+Every signed-in role can use `/support` to start a private chat or open a direct
+link such as `/support?chat=12`. Ordinary users and tenant admins see only their
+own support conversations. The central support team sees threads across tenants
+only through explicit operator configuration; tenant admin status alone grants
+no such access. Support staff can reply and close/reopen threads. Support access
+does not grant document, wallet, saved RAG conversation, or general tenant access.
+
+Before enabling, back up the database and arrange approved maintenance. After
+the existing security/accounts migrations, apply the optional additive migration:
+
+```bash
+python -m scripts.migrate_support
+```
+
+It creates `support_chats`, `support_messages`, and their indexes without changing
+existing application records. This migration is prepared in the repository; the
+API does not run it automatically. Set `RAG_SUPPORT_STAFF_USER_IDS` privately to
+the global user IDs of designated active administrator accounts, separated by
+commas, then restart FastAPI. Use dedicated operator-controlled accounts for
+central support. No real account IDs are preconfigured. Empty configuration
+disables new chats/replies but preserves users' access to their existing history.
+Invalid configuration fails closed; demotion/deactivation or removal from the
+allowlist removes global support access on subsequent requests.
+
+The inbox has status filters and 20/50/100 pagination. Thread messages arrive in
+incremental pages of at most 100. Mounted views poll every three seconds, pause
+while hidden/offline, and refresh on return without replacing content or edits.
+Only one read/write per resource runs at a time; obsolete responses are ignored.
+Message rendering is plain text, and per-request UUIDs prevent duplicate threads
+or messages after uncertain retries. Creation is limited to five open chats per
+user. Subjects have a 120-character limit; messages have a 4,000-character limit.
+
+This is staff messaging, separate from the RAG assistant and provider billing.
+Users explicitly submit support text; documents, prompts, and other chat history
+are not attached automatically. Support transcripts are persistent database data
+covered by backup/access/retention policies. There are no attachments, email/push
+notifications, typing/read receipts, presence guarantees, or dedicated staff roles
+in this first version. Staff must keep the page open to receive updates; users
+are told that replies may not be immediate. Shared throttling and broader support
+operations remain separate improvements.
+
+To disable new support activity, clear the staff setting and restart the API.
+Preserve the tables and transcripts; do not drop them for rollback. Revoked
+document access also depends on the new context-provenance checks, so retain those
+checks when rolling back other UI/support changes.
 
 ## Knowledge bases
 
@@ -860,10 +993,19 @@ above. Do not put credentials in URLs.
 | `POST /credits/orders` | Create a USDT payment using credits (decimal string), network and request_key (UUID); server determines identity and price. |
 | `POST /credits/orders/{order_id}/check` | Owner retrieves provider status and reconciles missed callbacks. |
 | `POST /payments/nowpayments/{mode}/ipn` | Provider-signed public callback, not user-session authentication; sandbox/live modes, bounded body and transactional replay protection. |
+| `GET /support/chats` | Own paginated chats; designated central staff get the global inbox. Query: page/page_size (20/50/100), status (all/open/closed). |
+| `POST /support/chats` | Create own chat with subject, body, request_key (UUID); identity is server-derived. |
+| `GET /support/chats/{id}/messages` | Owner or designated staff; after_id cursor, at most 100 messages and has_more. |
+| `POST /support/chats/{id}/messages` | Owner or designated staff sends body/request_key; closed chats reject new replies. |
+| `PATCH /support/chats/{id}` | Designated central staff only; status open/closed, locked and rechecked. |
 | `POST /auth/login`, `POST /auth/register` | Bearer-session login or invitation registration. Login: email/password; registration also needs username/invitation_code. |
 | `POST /auth/logout` | Revoke the supplied session. |
 | `POST /auth/browser/login`, `POST /auth/browser/register` | Same account flows with HttpOnly cookie, no session secret in response JSON. |
 | `GET /auth/session`, `POST /auth/browser/logout` | Restore/revoke browser session with browser request checks. |
+| `GET /auth/sessions` | Own active password sessions; page/page_size (20/50/100), current-session marker, password availability. No tokens or hashes. |
+| `POST /auth/password` | Own password change with current_password/new_password; revokes all password sessions atomically. API keys remain valid. |
+| `DELETE /auth/sessions/{session_id}` | Revoke an own active session; returns sign_in_required and revoked_count. Other users' sessions return 404. |
+| `POST /auth/sessions/revoke-others` | Revoke own active password sessions except the authenticating password session; API-key callers revoke all own password sessions. |
 | `POST /documents` | Writer JSON ingestion: title/text; creates private owned document. |
 | `GET /documents` | Existing visible indexed-document list contract. |
 | `GET /documents/library` | Combined authorized library; page/page_size/q/status/file_type. Status: indexed/queued/processing/failed; file type: pdf/md/txt; page size: 20/50/100. Returns items, total, page, page_size, pages. |
@@ -1175,7 +1317,7 @@ collections, feedback, usage and budgets. They are not future milestones.
 Remaining work includes:
 
 - Production TLS/identity integration, verified email, password reset, MFA/SSO,
-  distributed rate limiting, and richer session/key review.
+  distributed rate limiting, device/session metadata, and richer API-key lifecycle controls.
 - Least-privilege database roles and independent database row-level security;
   current tenant enforcement is application SQL plus selected tenant constraints.
 - Malware scanning, OCR, document classification/retention, encrypted storage
@@ -1184,7 +1326,7 @@ Remaining work includes:
   profiling, database indexes as justified by measurements, and load testing.
 - Durable shared telemetry, automated provider-billing reconciliation and
   generation idempotency.
-- Authorized multi-turn generation context and paginated long chat history.
+- Representative follow-up quality evaluation and paginated long RAG chat history.
 - A separately planned public landing page.
 
 Answer citations are references to retrieved excerpts, not machine-verified

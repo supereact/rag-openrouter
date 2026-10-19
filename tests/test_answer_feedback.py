@@ -97,6 +97,23 @@ def test_revoked_source_cannot_be_rated(fake,monkeypatch):
     assert exc.value.status_code == 404
 
 
+def test_revoked_context_dependency_hides_feedback_and_prevents_rating(fake, monkeypatch):
+    fake.sources = [{'document_id': 11, '_context_document_ids': [99]}]
+    monkeypatch.setattr(f, '_authorized_document_ids', lambda conn, principal, ids: ids - {99})
+    assert f.list_feedback(OWNER, 22) == []
+    with pytest.raises(HTTPException) as error:
+        f.save_feedback(OWNER, 22, 33, 'up')
+    assert error.value.status_code == 404
+    assert not any('INSERT INTO answer_feedback' in sql for sql, _ in fake.calls)
+
+
+def test_malformed_source_dependencies_fail_closed(fake):
+    fake.sources = [{'document_id': 11, '_context_document_ids': 'invalid'}]
+    assert f.list_feedback(OWNER, 22) == []
+    with pytest.raises(HTTPException):
+        f.remove_feedback(OWNER, 22, 33)
+
+
 def test_can_remove_own_rating(fake):
     f.remove_feedback(OWNER,22,33)
     assert any('DELETE FROM answer_feedback' in sql for sql,_ in fake.calls)

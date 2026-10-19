@@ -1,6 +1,8 @@
 import type { AskResponse, DocumentRecord, DocumentAccess, DocumentAccessUpdate, Identity, IngestResponse, IngestionJob, EnqueuedJob, AuthToken, AdminUser, AdminInvitation, NewInvitation, AdminDashboard, AdminUsage, AdminBudgets, Role, SavedConversation, SavedConversationDetail, KnowledgeBase, ConversationAskResponse, AnswerFeedback, AdminFeedback } from './types'
 import type { DocumentLibrary, AuditLog } from './types'
 import type { CreditSummary, CreditHistory, CreditOrder, CreditTransaction } from './types'
+import type { SupportChat, SupportChatList, SupportMessage, SupportMessages } from './types'
+import type { AccountSessions, AccountAction } from './types'
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -56,6 +58,24 @@ async function publicPost<T>(path: string, body: unknown): Promise<T> {
 }
 
 export const api = {
+  accountSessions: (key: string, page: number, size: number, signal?: AbortSignal) =>
+    request<AccountSessions>(key, `/auth/sessions?page=${page}&page_size=${size}`, {signal}),
+  changePassword: (key: string, current_password: string, new_password: string) =>
+    request<AccountAction>(key, '/auth/password', {method: 'POST', body: JSON.stringify({current_password, new_password})}),
+  revokeOwnSession: (key: string, id: number) =>
+    request<AccountAction>(key, `/auth/sessions/${id}`, {method: 'DELETE'}),
+  revokeOtherSessions: (key: string) =>
+    request<AccountAction>(key, '/auth/sessions/revoke-others', {method: 'POST'}),
+  supportChats: (key: string, page: number, pageSize: number, status: string, signal?: AbortSignal) =>
+    request<SupportChatList>(key, `/support/chats?${new URLSearchParams({page: String(page), page_size: String(pageSize), status})}`, {signal}),
+  createSupportChat: (key: string, subject: string, body: string, request_key: string) =>
+    request<SupportChat>(key, '/support/chats', {method: 'POST', body: JSON.stringify({subject, body, request_key})}),
+  supportMessages: (key: string, id: number, afterId: number, signal?: AbortSignal) =>
+    request<SupportMessages>(key, `/support/chats/${id}/messages?after_id=${afterId}`, {signal}),
+  sendSupportMessage: (key: string, id: number, body: string, request_key: string) =>
+    request<SupportMessage>(key, `/support/chats/${id}/messages`, {method: 'POST', body: JSON.stringify({body, request_key})}),
+  setSupportStatus: (key: string, id: number, status: 'open' | 'closed') =>
+    request<SupportChat>(key, `/support/chats/${id}`, {method: 'PATCH', body: JSON.stringify({status})}),
   credits: (key: string, signal?: AbortSignal) => request<CreditSummary>(key, '/credits', {signal}),
   creditOrders: (key: string, page: number, size: number, signal?: AbortSignal) =>
     request<CreditHistory<CreditOrder>>(key, `/credits/orders?page=${page}&page_size=${size}`, {signal}),

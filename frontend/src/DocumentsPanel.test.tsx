@@ -33,7 +33,7 @@ it('binds server filters to the URL, resets pages, and follows query history', a
   await waitFor(() => expect(api.library).toHaveBeenCalledTimes(2))
   expect(new URLSearchParams(window.location.search).get('page')).toBe('1')
   expect(new URLSearchParams(window.location.search).get('q')).toBe('policy')
-  fireEvent.change(screen.getByLabelText('Rows per page'),{target:{value:'100'}})
+  fireEvent.change(await screen.findByLabelText('Rows per page'),{target:{value:'100'}})
   await waitFor(() => expect(api.library).toHaveBeenCalledTimes(3))
   act(() => window.history.back())
   await waitFor(() => expect(screen.getByLabelText('Rows per page')).toHaveValue('50'))

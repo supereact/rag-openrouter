@@ -19,7 +19,10 @@ from app.db import db_connection
 from app import browser_auth
 from app import audit_log
 from app import credit_wallets
+from app.conversation_context import ConversationContext
 from app.credits_api import router as credits_router
+from app.support_api import router as support_router
+from app.account_security_api import router as account_security_router
 from app.ingestion_jobs import queue_upload, list_jobs, get_job, job_health, remove_failed_job
 from app.document_library import list_library
 from app.model_warmup import warmup_local_models
@@ -59,6 +62,8 @@ app = FastAPI(
 
 _http_logger = logging.getLogger("rag.http")
 app.include_router(credits_router)
+app.include_router(support_router)
+app.include_router(account_security_router)
 
 
 @app.middleware("http")
@@ -115,7 +120,8 @@ def ask(body: SearchRequest, principal: Principal = Depends(require_principal)):
     return _run_ask(body, principal)
 
 
-def _run_ask(body: SearchRequest, principal: Principal) -> AskResponse:
+def _run_ask(body: SearchRequest, principal: Principal, *,
+             conversation_context: ConversationContext | None = None) -> AskResponse:
     # Fail closed if prepaid enforcement is configured with an unsupported provider/mode.
     credit_wallets.enforcement_enabled()
     if body.knowledge_base_id is not None:
@@ -132,11 +138,15 @@ def _run_ask(body: SearchRequest, principal: Principal) -> AskResponse:
         scope = ({'knowledge_base_id': body.knowledge_base_id}
                  if body.knowledge_base_id is not None else {})
         with measure(principal.tenant_id, "ask", "retrieval"):
-            hits = search_documents(body.question, body.top_k, principal=principal, **scope)
+            query = (conversation_context.retrieval_query(body.question)
+                     if conversation_context else body.question)
+            hits = search_documents(query, body.top_k, principal=principal, **scope)
         with measure(principal.tenant_id, "ask", "generation"):
             # Empty retrieval returns a local answer without contacting the provider.
             generation_attempted = bool(hits)
-            answer = answer_question(body.question, hits)
+            context_args = ({'conversation_context': conversation_context.prompt()}
+                            if conversation_context and conversation_context.turns else {})
+            answer = answer_question(body.question, hits, **context_args)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     finally:
@@ -592,9 +602,11 @@ def ask_in_conversation(conversation_id: int, body: SearchRequest,
                         principal: Principal = Depends(require_principal)):
     # Fail closed before any model call or paid budget reservation.
     conversations.assert_owned(principal, conversation_id)
-    result = _run_ask(body, principal)
+    context = conversations.load_context(principal, conversation_id, body.knowledge_base_id)
+    result = _run_ask(body, principal, conversation_context=context)
+    provenance = {'context_document_ids': context.document_ids} if context.turns else {}
     message_id = conversations.append_exchange(
-        principal, conversation_id, result.question, result.answer, result.sources)
+        principal, conversation_id, result.question, result.answer, result.sources, **provenance)
     return {**result.model_dump(mode='json'), 'message_id': message_id}
 
 

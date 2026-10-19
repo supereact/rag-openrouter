@@ -1,4 +1,19 @@
 export type Role = 'admin' | 'editor' | 'reader'
+export interface AccountSession {
+  id: number
+  created_at: string
+  expires_at: string
+  current: boolean
+}
+export interface AccountSessions {
+  password_enabled: boolean
+  password_session: boolean
+  sessions: AccountSession[]
+  total: number
+  page: number
+  page_size: number
+}
+export interface AccountAction { sign_in_required: boolean; revoked_count?: number }
 export interface Identity {
   user_id: number
   tenant_id: number
@@ -205,4 +220,35 @@ export interface AdminFeedback {
   downvote_reasons: {reason: string; count: number}[]
   recent_downvotes: {username: string; reason: string | null; created_at: string}[]
   disclaimer: string
+}
+export interface SupportChat {
+  id: number
+  subject: string
+  tenant_id: number
+  user_id: number
+  username: string
+  status: 'open' | 'closed'
+  created_at: string
+  updated_at: string
+}
+export interface SupportMessage {
+  id: number
+  sender_user_id: number
+  username: string
+  author_kind: 'user' | 'staff'
+  body: string
+  created_at: string
+}
+export interface SupportChatList {
+  items: SupportChat[]
+  total: number
+  page: number
+  page_size: number
+  is_staff: boolean
+  enabled: boolean
+}
+export interface SupportMessages {
+  chat: SupportChat
+  messages: SupportMessage[]
+  has_more: boolean
 }

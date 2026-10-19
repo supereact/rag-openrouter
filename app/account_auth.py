@@ -115,7 +115,7 @@ def login(email: str, password: str, client_ip: str) -> dict:
         raise HTTPException(status_code=429, detail='Too many attempts. Try again later.')
     with db_connection() as conn:
         row = conn.execute('''SELECT id,password_hash,is_active FROM app_users
-                              WHERE lower(email)=%s''', (normalized,)).fetchone()
+                              WHERE lower(email)=%s FOR UPDATE''', (normalized,)).fetchone()
         correct = verify_password(password, row[1] if row else None)
         if row is None or not correct or not row[2]:
             login_throttle.failure(throttle_key)

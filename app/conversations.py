@@ -15,6 +15,11 @@ from app.db import db_connection
 from app.security import Principal
 from app.services import ACCESS_SQL, access_args
 from app.schemas import SearchHit
+from app.conversation_context import (
+    ConversationContext, ContextTurn, MAX_TURNS, MAX_QUESTION_CHARS, MAX_ANSWER_CHARS,
+)
+
+_CONTEXT_DOCUMENTS = '_context_document_ids'
 
 
 def _not_found() -> HTTPException:
@@ -83,9 +88,15 @@ def delete_conversation(principal: Principal, conversation_id: int) -> None:
 
 
 def append_exchange(principal: Principal, conversation_id: int, question: str,
-                    answer: str, sources: list[SearchHit]) -> int:
+                    answer: str, sources: list[SearchHit], *,
+                    context_document_ids: set[int] | None = None) -> int:
     """Save one completed exchange atomically after /ask's budget settlement."""
-    encoded = json.dumps([source.model_dump(mode='json') for source in sources])
+    snapshots = [source.model_dump(mode='json') for source in sources]
+    if snapshots and context_document_ids:
+        # Internal JSON metadata keeps transitive context dependencies without
+        # adding a table/column or exposing old excerpts as fresh citations.
+        snapshots[0][_CONTEXT_DOCUMENTS] = sorted(context_document_ids)
+    encoded = json.dumps(snapshots)
     with db_connection() as conn:
         # FOR UPDATE serializes concurrent writes on the same conversation.
         row = conn.execute('''SELECT id FROM conversations
@@ -101,13 +112,66 @@ def append_exchange(principal: Principal, conversation_id: int, question: str,
     return int(msg_id)
 
 
-def _authorized_document_ids(conn, principal: Principal, doc_ids: set[int]) -> set[int]:
+def _authorized_document_ids(conn, principal: Principal, doc_ids: set[int],
+                             knowledge_base_id: int | None = None) -> set[int]:
     if not doc_ids:
         return set()
+    scope = (''' AND EXISTS (SELECT 1 FROM knowledge_base_documents kbd
+        WHERE kbd.document_id=d.id AND kbd.tenant_id=d.tenant_id
+          AND kbd.knowledge_base_id=%s)''') if knowledge_base_id is not None else ''
+    args = (knowledge_base_id,) if knowledge_base_id is not None else ()
     rows = conn.execute(f'''SELECT d.id FROM documents d
-        WHERE d.id = ANY(%s) AND {ACCESS_SQL}''',
-        (list(doc_ids), *access_args(principal))).fetchall()
+        WHERE d.id = ANY(%s) AND {ACCESS_SQL}{scope}''',
+        (list(doc_ids), *access_args(principal), *args)).fetchall()
     return {int(row[0]) for row in rows}
+
+
+def _decode_sources(raw) -> tuple[list[dict], set[int], bool]:
+    """Read legacy snapshots plus private context provenance; fail closed."""
+    try:
+        raw = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(raw, list):
+            raise ValueError('Invalid source snapshots')
+        sources, documents = [], set()
+        for source in raw:
+            if not isinstance(source, dict):
+                raise ValueError('Invalid source snapshot')
+            dependencies = source.get(_CONTEXT_DOCUMENTS, [])
+            if not isinstance(dependencies, list):
+                raise ValueError('Invalid context dependencies')
+            for doc_id in [source.get('document_id'), *dependencies]:
+                if type(doc_id) is not int or doc_id <= 0:
+                    raise ValueError('Invalid document identity')
+                documents.add(doc_id)
+            sources.append({key: value for key, value in source.items() if key != _CONTEXT_DOCUMENTS})
+        return sources, documents, True
+    except (ValueError, TypeError, RecursionError):
+        return [], set(), False
+
+
+def load_context(principal: Principal, conversation_id: int,
+                 knowledge_base_id: int | None = None) -> ConversationContext:
+    """Read recent owner-only turns and recheck all source/dependency ACLs.
+
+    A revoked or out-of-scope turn is a boundary: older context is also omitted
+    so follow-ups cannot accidentally refer to an earlier, different topic.
+    """
+    with db_connection() as conn:
+        _owned(conn, principal, conversation_id)
+        rows = conn.execute('''SELECT question,answer,sources
+            FROM conversation_messages WHERE conversation_id=%s
+            ORDER BY id DESC LIMIT %s''', (conversation_id, MAX_TURNS)).fetchall()
+        decoded = [(question, answer, *_decode_sources(sources))
+                   for question, answer, sources in rows]
+        documents = {doc for _, _, _, ids, _ in decoded for doc in ids}
+        allowed = _authorized_document_ids(conn, principal, documents, knowledge_base_id)
+    turns = []
+    for question, answer, sources, ids, valid in decoded:
+        if not valid or not sources or not ids <= allowed:
+            break
+        turns.append(ContextTurn(question[:MAX_QUESTION_CHARS], answer[:MAX_ANSWER_CHARS],
+                                 frozenset(ids)))
+    return ConversationContext(tuple(reversed(turns)))
 
 
 def get_conversation(principal: Principal, conversation_id: int) -> dict:
@@ -122,17 +186,13 @@ def get_conversation(principal: Principal, conversation_id: int) -> dict:
         docs: set[int] = set()
         decoded = []
         for msg_id, question, answer, sources, created_at in rows:
-            if isinstance(sources, str):
-                sources = json.loads(sources)
-            if not isinstance(sources, list):
-                sources = []
-            docs.update(int(src['document_id']) for src in sources if isinstance(src,dict) and 'document_id' in src)
-            decoded.append((msg_id,question,answer,sources,created_at))
+            sources, dependencies, valid = _decode_sources(sources)
+            docs.update(dependencies)
+            decoded.append((msg_id,question,answer,sources,created_at,dependencies,valid))
         authorized = _authorized_document_ids(conn,principal,docs)
     messages = []
-    for msg_id, question, answer, sources, created_at in decoded:
-        revoked = any(int(src['document_id']) not in authorized for src in sources
-                      if isinstance(src,dict) and 'document_id' in src)
+    for msg_id, question, answer, sources, created_at, dependencies, valid in decoded:
+        revoked = not valid or not dependencies <= authorized
         messages.append(dict(
             id=msg_id,
             question=question,

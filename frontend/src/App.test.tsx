@@ -4,11 +4,15 @@ import App from './App'
 import { api, ApiError } from './api'
 import { navigate } from './navigation'
 
+vi.mock('./landing.css', () => ({}))
+
 vi.mock('./api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api')>()
   return {
     ...actual,
     api: {
+      accountSessions: vi.fn(), changePassword: vi.fn(), revokeOwnSession: vi.fn(), revokeOtherSessions: vi.fn(),
+      supportChats: vi.fn(), createSupportChat: vi.fn(), supportMessages: vi.fn(), sendSupportMessage: vi.fn(), setSupportStatus: vi.fn(),
       credits: vi.fn(), creditOrders: vi.fn(), creditTransactions: vi.fn(), purchaseCredits: vi.fn(), checkCreditOrder: vi.fn(),
       library: vi.fn(), removeJob: vi.fn(), documentAccess: vi.fn(), updateDocumentAccess: vi.fn(),
       me: vi.fn(), ask: vi.fn(), documents: vi.fn(), upload: vi.fn(),
@@ -50,13 +54,17 @@ async function login() {
 
 beforeEach(() => {
   vi.clearAllMocks()
-  window.history.replaceState({}, "", "/")
+  // App/auth tests start at the dedicated sign-in route; / is now public.
+  window.history.replaceState({}, "", "/login")
   vi.stubGlobal('localStorage', storage)
   vi.mocked(api.browserSession).mockReset().mockRejectedValue(new ApiError(401, 'No session'))
   vi.mocked(api.browserLogin).mockReset().mockResolvedValue(account)
   vi.mocked(api.browserRegister).mockReset().mockResolvedValue(account)
   vi.mocked(api.browserLogout).mockReset().mockResolvedValue(undefined)
   vi.mocked(api.me).mockResolvedValue(account)
+  vi.mocked(api.accountSessions).mockResolvedValue({password_enabled:true,password_session:true,sessions:[],total:0,page:1,page_size:20})
+  vi.mocked(api.changePassword).mockReset().mockResolvedValue({sign_in_required:true})
+  vi.mocked(api.supportChats).mockResolvedValue({items:[],total:0,page:1,page_size:20,is_staff:false,enabled:false})
   vi.mocked(api.credits).mockResolvedValue({mode:'disabled',payments_enabled:false,usage_enforced:false,balance:'0',reserved:'0',available:'0',service_fee_percent:'5.5',minimum_credits:'10.00',maximum_credits:'1000.00',networks:[]})
   vi.mocked(api.creditOrders).mockResolvedValue({items:[],total:0,page:1,page_size:20,pages:1})
   vi.mocked(api.creditTransactions).mockResolvedValue({items:[],total:0,page:1,page_size:20,pages:1})
@@ -92,6 +100,34 @@ beforeEach(() => {
   vi.mocked(api.adminInvitations).mockResolvedValue([])
   vi.mocked(api.logout).mockResolvedValue(undefined)
   vi.mocked(api.pdf).mockRejectedValue(new Error("Original PDF unavailable"))
+})
+
+it('returns to the Support URL after sign-in and exposes support to ordinary users', async () => {
+  window.history.replaceState({}, '', '/support')
+  render(<App/>)
+  await login()
+  await screen.findByRole('heading', {name: 'Support'})
+  expect(window.location.pathname).toBe('/support')
+  expect(screen.getByRole('link', {name: 'Support'})).toHaveAttribute('aria-current', 'page')
+  await waitFor(() => expect(api.supportChats).toHaveBeenCalled())
+  expect(screen.queryByRole('heading', {name: 'Central support inbox'})).not.toBeInTheDocument()
+})
+
+it('opens a direct Account URL for an ordinary user and signs out after a password change', async () => {
+  window.history.replaceState({}, '', '/account')
+  vi.mocked(api.browserSession).mockResolvedValue(account)
+  render(<App/>)
+  await screen.findByLabelText('Current password')
+  expect(screen.getByRole('link', {name:'Account'})).toHaveAttribute('aria-current', 'page')
+  fireEvent.change(screen.getByLabelText('Current password'), {target:{value:'old-password-for-tests'}})
+  fireEvent.change(screen.getByLabelText('New password'), {target:{value:'new-password-for-tests'}})
+  fireEvent.change(screen.getByLabelText('Confirm new password'), {target:{value:'new-password-for-tests'}})
+  fireEvent.click(screen.getByRole('button', {name:'Update password'}))
+  await screen.findByRole('button', {name:'Sign in'})
+  expect(screen.getByText('Password changed. Sign in again with your new password.')).toBeInTheDocument()
+  expect(window.location.pathname).toBe('/login')
+  expect(new URLSearchParams(window.location.search).get('returnTo')).toBe('/account')
+  expect(api.browserLogout).not.toHaveBeenCalled()
 })
 
 // Vitest does not always register RTL's automatic cleanup unless its
@@ -220,6 +256,93 @@ describe('browser session restoration', () => {
     await screen.findByRole('button',{name:'Sign in'})
     await act(async () => finish(account))
     expect(screen.queryByRole('navigation')).not.toBeInTheDocument()
+  })
+})
+
+describe('public landing and authentication routes', () => {
+  it('renders / while session restoration is pending without mounting protected panels', async () => {
+    window.history.replaceState({}, '', '/')
+    vi.mocked(api.browserSession).mockReturnValueOnce(new Promise(() => {}))
+    render(<App/>)
+    expect(await screen.findByRole('heading', { level: 1 })).toHaveTextContent('Answers you can verify.')
+    expect(window.location.pathname).toBe('/')
+    expect(screen.queryByText('Restoring your session…')).not.toBeInTheDocument()
+    expect(screen.queryByRole('navigation', { name: 'Main navigation' })).not.toBeInTheDocument()
+    expect(api.conversations).not.toHaveBeenCalled()
+    expect(api.library).not.toHaveBeenCalled()
+    expect(api.ask).not.toHaveBeenCalled()
+    expect(api.pdf).not.toHaveBeenCalled()
+    expect(api.adminDashboard).not.toHaveBeenCalled()
+  })
+
+  it('keeps the public page available when the API session check fails', async () => {
+    window.history.replaceState({}, '', '/')
+    vi.mocked(api.browserSession).mockRejectedValueOnce(new Error('API unavailable'))
+    render(<App/>)
+    expect(await screen.findByRole('heading', { level: 1 })).toHaveTextContent('Answers you can verify.')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    fireEvent.click(within(screen.getByRole('banner')).getByRole('link', { name: 'Sign in' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not check your session')
+    expect(api.conversations).not.toHaveBeenCalled()
+  })
+
+  it('opens invitation registration from Get started and signs in using the existing API', async () => {
+    window.history.replaceState({}, '', '/')
+    render(<App/>)
+    fireEvent.click((await screen.findAllByRole('link', { name: /Get started/ }))[0])
+    expect(await screen.findByLabelText('Invitation code')).toBeInTheDocument()
+    expect(window.location.pathname + window.location.search).toBe('/login?mode=register')
+    fireEvent.change(screen.getByLabelText('Invitation code'), { target: { value: 'invite_example_code' } })
+    fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'example-user' } })
+    fireEvent.change(screen.getByLabelText('Email address'), { target: { value: 'example@example.org' } })
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'test-only-password-123' } })
+    fireEvent.change(screen.getByLabelText('Confirm password'), { target: { value: 'test-only-password-123' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create account' }))
+    await screen.findByRole('navigation', { name: 'Main navigation' })
+    expect(api.browserRegister).toHaveBeenCalledWith('invite_example_code', 'example@example.org', 'example-user', 'test-only-password-123')
+    expect(window.location.pathname).toBe('/assistant')
+    expect(storage.setItem).not.toHaveBeenCalled()
+  })
+
+  it('supports Sign in, Back/Forward and a direct registration destination', async () => {
+    window.history.replaceState({}, '', '/')
+    render(<App/>)
+    await screen.findByRole('heading', { level: 1 })
+    fireEvent.click(within(screen.getByRole('banner')).getByRole('link', { name: 'Sign in' }))
+    expect(await screen.findByRole('button', { name: 'Sign in' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Invitation code')).not.toBeInTheDocument()
+    act(() => window.history.back())
+    await screen.findByRole('heading', { level: 1, name: /Answers you can verify\./ })
+    act(() => window.history.forward())
+    await screen.findByRole('button', { name: 'Sign in' })
+    act(() => navigate('/login?mode=register&returnTo=%2Fdocuments%3Fq%3Dpolicy'))
+    await screen.findByLabelText('Invitation code')
+    await login()
+    expect(window.location.pathname + window.location.search).toBe('/documents?q=policy')
+  })
+
+  it('keeps / public for an existing session and opens the authorized workspace on demand', async () => {
+    window.history.replaceState({}, '', '/')
+    vi.mocked(api.browserSession).mockResolvedValueOnce(account)
+    render(<App/>)
+    const links = await screen.findAllByRole('link', { name: /Open workspace/ })
+    expect(window.location.pathname).toBe('/')
+    expect(api.conversations).not.toHaveBeenCalled()
+    fireEvent.click(links[0])
+    await screen.findByRole('navigation', { name: 'Main navigation' })
+    expect(window.location.pathname).toBe('/assistant')
+    expect(screen.queryByRole('link', { name: 'Dashboard' })).not.toBeInTheDocument()
+    expect(api.me).not.toHaveBeenCalled()
+  })
+
+  it('ignores unsupported sign-in modes and lets visitors return home', async () => {
+    window.history.replaceState({}, '', '/login?mode=unknown')
+    render(<App/>)
+    await screen.findByRole('button', { name: 'Sign in' })
+    expect(screen.queryByLabelText('Invitation code')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('link', { name: 'KnowledgeBase home' }))
+    expect(await screen.findByRole('heading', { level: 1 })).toHaveTextContent('Answers you can verify.')
+    expect(window.location.pathname).toBe('/')
   })
 })
 

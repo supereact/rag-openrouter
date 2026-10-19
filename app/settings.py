@@ -23,3 +23,6 @@ NOWPAYMENTS_IPN_SECRET = os.getenv('NOWPAYMENTS_IPN_SECRET', '')
 NOWPAYMENTS_SANDBOX_API_KEY = os.getenv('NOWPAYMENTS_SANDBOX_API_KEY', '')
 NOWPAYMENTS_SANDBOX_IPN_SECRET = os.getenv('NOWPAYMENTS_SANDBOX_IPN_SECRET', '')
 RAG_PAYMENTS_CALLBACK_BASE_URL = os.getenv('RAG_PAYMENTS_CALLBACK_BASE_URL', '').rstrip('/')
+
+# Explicit global support access; only listed active administrator accounts qualify.
+RAG_SUPPORT_STAFF_USER_IDS = os.getenv('RAG_SUPPORT_STAFF_USER_IDS', '')

@@ -2,13 +2,12 @@
 # Do not store user questions or answers in feedback.
 from __future__ import annotations
 
-import json
 from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
 
 from app.db import db_connection
 from app.security import Principal
-from app.conversations import _authorized_document_ids
+from app.conversations import _authorized_document_ids, _decode_sources
 
 REASONS = frozenset({'incorrect', 'incomplete', 'irrelevant', 'outdated', 'other'})
 
@@ -25,13 +24,9 @@ def _owned_message(conn, principal: Principal, conversation_id: int, message_id:
         (message_id, conversation_id, principal.tenant_id, principal.user_id)).fetchone()
     if row is None:
         raise _not_found()
-    sources = row[0]
-    if isinstance(sources, str):
-        sources = json.loads(sources)
-    if not isinstance(sources, list):
+    _, ids, valid = _decode_sources(row[0])
+    if not valid:
         raise _not_found()
-    ids = {int(src['document_id']) for src in sources
-           if isinstance(src, dict) and 'document_id' in src}
     if ids - _authorized_document_ids(conn, principal, ids):
         raise _not_found()
 
@@ -89,11 +84,10 @@ def list_feedback(principal: Principal, conversation_id: int) -> list[dict]:
         source_ids = {}
         all_ids = set()
         for msg_id, sources in message_rows:
-            if isinstance(sources,str): sources=json.loads(sources)
-            ids={int(src['document_id']) for src in sources
-                 if isinstance(src,dict) and 'document_id' in src} if isinstance(sources,list) else set()
-            source_ids[int(msg_id)]=ids
-            all_ids.update(ids)
+            _, ids, valid = _decode_sources(sources)
+            if valid:
+                source_ids[int(msg_id)]=ids
+                all_ids.update(ids)
         authorized = _authorized_document_ids(conn,principal,all_ids)
     return [{'message_id':row[0], 'rating':'up' if row[1]==1 else 'down',
              'reason':row[2], 'updated_at':row[3]}
