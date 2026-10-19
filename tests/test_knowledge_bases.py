@@ -83,7 +83,7 @@ def test_collection_is_checked_before_embeddings(monkeypatch):
 def test_hybrid_both_branches_use_collection_and_acl(monkeypatch):
     calls = []
     monkeypatch.setattr(knowledge_bases, 'assert_tenant_collection', lambda *_: None)
-    monkeypatch.setattr(services, 'embed_many', lambda *_: [[0.1] * 384])
+    monkeypatch.setattr(services, 'embed_many', lambda *_, **_kwargs: [[0.1] * 384])
     monkeypatch.setattr(services, '_audit', lambda *_a, **_kw: None)
     monkeypatch.setattr(services, 'db_connection', lambda: fake_db(calls))
     services.search_documents('VPN troubleshooting', 5, mode='hybrid', principal=READER,
@@ -99,7 +99,7 @@ def test_hybrid_both_branches_use_collection_and_acl(monkeypatch):
 
 def test_all_documents_mode_has_no_collection_filter(monkeypatch):
     calls = []
-    monkeypatch.setattr(services, 'embed_many', lambda *_: [[0.1] * 384])
+    monkeypatch.setattr(services, 'embed_many', lambda *_, **_kwargs: [[0.1] * 384])
     monkeypatch.setattr(services, '_audit', lambda *_a, **_kw: None)
     monkeypatch.setattr(services, 'db_connection', lambda: fake_db(calls))
     services.search_documents('VPN troubleshooting', 5, mode='vector', principal=READER)

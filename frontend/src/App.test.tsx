@@ -9,6 +9,7 @@ vi.mock('./api', async (importOriginal) => {
   return {
     ...actual,
     api: {
+      credits: vi.fn(), creditOrders: vi.fn(), creditTransactions: vi.fn(), purchaseCredits: vi.fn(), checkCreditOrder: vi.fn(),
       library: vi.fn(), removeJob: vi.fn(), documentAccess: vi.fn(), updateDocumentAccess: vi.fn(),
       me: vi.fn(), ask: vi.fn(), documents: vi.fn(), upload: vi.fn(),
       conversationFeedback: vi.fn(), setAnswerFeedback: vi.fn(), deleteAnswerFeedback: vi.fn(), adminFeedback: vi.fn(),
@@ -56,6 +57,9 @@ beforeEach(() => {
   vi.mocked(api.browserRegister).mockReset().mockResolvedValue(account)
   vi.mocked(api.browserLogout).mockReset().mockResolvedValue(undefined)
   vi.mocked(api.me).mockResolvedValue(account)
+  vi.mocked(api.credits).mockResolvedValue({mode:'disabled',payments_enabled:false,usage_enforced:false,balance:'0',reserved:'0',available:'0',service_fee_percent:'5.5',minimum_credits:'10.00',maximum_credits:'1000.00',networks:[]})
+  vi.mocked(api.creditOrders).mockResolvedValue({items:[],total:0,page:1,page_size:20,pages:1})
+  vi.mocked(api.creditTransactions).mockResolvedValue({items:[],total:0,page:1,page_size:20,pages:1})
   vi.mocked(api.documents).mockResolvedValue([])
   vi.mocked(api.library).mockResolvedValue({items: [], total: 0, page: 1, page_size: 20, pages: 1})
   vi.mocked(api.knowledgeBases).mockResolvedValue([])
@@ -98,6 +102,22 @@ afterEach(() => {
 })
 
 describe('browser session restoration', () => {
+  it('lets a reader return to Credits after sign-in and navigate Back', async () => {
+    window.history.replaceState({}, '', '/credits')
+    render(<App/>)
+    await login()
+    await screen.findByRole('heading', {name: 'Credits'})
+    expect(screen.getByRole('link', {name: 'Credits'})).toHaveAttribute('aria-current', 'page')
+    expect(screen.queryByRole('link', {name: 'Dashboard'})).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('link', {name: 'Assistant'}))
+    await screen.findByRole('heading', {name: 'Knowledge Assistant'})
+    await act(async () => {
+      window.history.back()
+      await new Promise(resolve => setTimeout(resolve, 20))
+    })
+    await screen.findByRole('heading', {name: 'Credits'})
+    expect(api.credits).toHaveBeenCalledWith('rag_dummy_key', expect.any(AbortSignal))
+  })
   it('restores password sign-in after a full app remount and preserves the current URL', async () => {
     const view = render(<App/>)
     fireEvent.click(await screen.findByRole('button',{name:'Email sign in'}))

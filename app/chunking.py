@@ -3,6 +3,7 @@
 The budget is in characters, not model tokens. Overlap copies complete words.
 """
 import re
+from app.chinese import chunk_han, contains_han
 
 _SENTENCES = re.compile(r'(?<=[.!?])\s+(?=["\'“‘(]*[A-Z0-9])')
 
@@ -59,6 +60,8 @@ def chunk_text(raw_text: str, chunk_size: int = 800, overlap: int = 120) -> list
         raise ValueError('chunk_size must be at least 10')
     if not 0 <= overlap < chunk_size:
         raise ValueError('overlap must satisfy 0 <= overlap < chunk_size')
+    if contains_han(raw_text):
+        return chunk_han(raw_text, chunk_size, overlap)
     units = _units(raw_text, chunk_size)
     if not units:
         return []

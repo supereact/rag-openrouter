@@ -85,6 +85,48 @@ def test_unlimited_existing_behavior(monkeypatch):
     assert conn.log[0][1] == (READER.tenant_id,)
 
 
+def test_prepaid_wallet_reserves_even_without_monthly_limits(monkeypatch):
+    from unittest.mock import Mock
+    conn = FakeConn()
+    inject(monkeypatch, conn)
+    monkeypatch.setattr(budget.credit_wallets, 'enforcement_enabled', lambda: True)
+    reserve = Mock()
+    monkeypatch.setattr(budget.credit_wallets, 'reserve', reserve)
+    rid = budget.reserve_request(READER)
+    assert conn.reservations[rid] == 'reserved'
+    reserve.assert_called_once_with(conn, READER, rid, Decimal('0.01'))
+
+
+def test_monthly_limit_still_blocks_prepaid_reservation(monkeypatch):
+    from unittest.mock import Mock
+    conn = FakeConn(user=(Decimal('0'), False))
+    inject(monkeypatch, conn)
+    monkeypatch.setattr(budget.credit_wallets, 'enforcement_enabled', lambda: True)
+    reserve = Mock()
+    monkeypatch.setattr(budget.credit_wallets, 'reserve', reserve)
+    with pytest.raises(HTTPException):
+        budget.reserve_request(READER)
+    reserve.assert_not_called()
+
+
+def test_provider_settlement_and_unused_release_share_wallet_transaction(monkeypatch):
+    from unittest.mock import Mock
+    conn = FakeConn(tenant=(Decimal('1'), False, Decimal('.01')))
+    inject(monkeypatch, conn)
+    finalize = Mock()
+    monkeypatch.setattr(budget.credit_wallets, 'finalize', finalize)
+    rid = budget.reserve_request(READER)
+    budget.settle_request(rid, READER, 'synthetic/model', {'provider_cost_credits': 0.001})
+    finalize.assert_called_once_with(conn, READER, rid, cost=Decimal('0.001'))
+    assert conn.event_inserts == 1
+    # Repeated settlement cannot charge the wallet twice.
+    budget.settle_request(rid, READER, 'synthetic/model', {'provider_cost_credits': 0.001})
+    assert finalize.call_count == 1
+    second = budget.reserve_request(READER)
+    budget.release_before_generation(second, READER)
+    finalize.assert_called_with(conn, READER, second, release=True)
+
+
 def test_rejects_tenant_budget_before_openrouter(monkeypatch):
     conn = FakeConn(tenant=(Decimal('0.01'), False, Decimal('0.01')),
                     totals=(Decimal('0.004'),Decimal('0'),Decimal('0'),Decimal('0')))

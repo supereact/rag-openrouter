@@ -5,7 +5,7 @@ from pathlib import Path
 from pypdf import PdfReader
 
 MAX_FILE_BYTES = 50 * 1024 * 1024
-MAX_PDF_PAGES = 100
+MAX_PDF_PAGES = 1000
 ALLOWED_EXTENSIONS = {".txt", ".md", ".pdf"}
 
 
@@ -27,7 +27,7 @@ def extract_document(filename: str, data: bytes) -> tuple[str, str]:
             if reader.is_encrypted:
                 raise ValueError("Encrypted PDFs are not supported")
             if len(reader.pages) > MAX_PDF_PAGES:
-                raise ValueError("PDF exceeds the 100-page limit")
+                raise ValueError(f"PDF exceeds the {MAX_PDF_PAGES}-page limit")
             text = "\n\n".join(page.extract_text() or "" for page in reader.pages)
         except ValueError:
             raise

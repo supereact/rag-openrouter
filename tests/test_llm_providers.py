@@ -63,3 +63,29 @@ def test_unknown_provider(monkeypatch):
     monkeypatch.setattr(settings, "LLM_PROVIDER", "unknown")
     with pytest.raises(RuntimeError, match="LLM_PROVIDER"):
         llm.generate_grounded_answer("q", "ctx")
+
+
+@pytest.mark.parametrize('provider', ['openrouter', 'openai'])
+def test_chinese_question_and_citations_reach_provider_unchanged(monkeypatch, provider):
+    requests = []
+    def create(**kwargs):
+        requests.append(kwargs)
+        return SimpleNamespace(output_text='十五天。[1]', choices=[SimpleNamespace(
+            message=SimpleNamespace(content='十五天。[1]'))])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+                             responses=SimpleNamespace(create=create))
+    monkeypatch.setitem(sys.modules, 'openai', SimpleNamespace(OpenAI=lambda **_: client))
+    monkeypatch.setattr(settings, 'LLM_PROVIDER', provider)
+    monkeypatch.setattr(settings, 'OPENROUTER_API_KEY', 'test-key')
+    monkeypatch.setattr(settings, 'OPENROUTER_MODEL', 'test-model')
+    monkeypatch.setattr(settings, 'OPENAI_API_KEY', 'test-key')
+    monkeypatch.setattr(settings, 'OPENAI_MODEL', 'test-model')
+    assert llm.generate_grounded_answer('年假有多少天？', '[1] 員工年假：十五天。') == '十五天。[1]'
+    assert len(requests) == 1
+    request = requests[0]
+    instructions = request['messages'][0]['content'] if provider == 'openrouter' else request['instructions']
+    prompt = request['messages'][1]['content'] if provider == 'openrouter' else request['input']
+    assert 'same language and script' in instructions
+    assert 'untrusted data' in instructions
+    assert '年假有多少天？' in prompt
+    assert '[1] 員工年假：十五天。' in prompt

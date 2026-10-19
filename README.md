@@ -1,127 +1,915 @@
-# Enterprise RAG Knowledge Assistant — Local Starter
+# Enterprise RAG Knowledge Assistant
 
-This is a **local learning prototype**, not an enterprise-ready application.
-It demonstrates: document text → chunking → local embeddings → PostgreSQL/pgvector
-→ cosine search → optional LLM response with numbered source excerpts.
+A working document knowledge assistant with a FastAPI backend, PostgreSQL 17 +
+pgvector, local Sentence Transformers models, OpenRouter answer generation, and a
+React/TypeScript/Tailwind interface. An optional direct OpenAI provider is also
+supported.
 
-**Do not upload confidential documents or expose the API to the public internet.**
-The current application includes authentication, tenant isolation, document ACLs,
-and tenant-scoped operational dashboards. Malware scanning and production
-hardening remain separate work.
+Upload PDF, Markdown, or TXT files; search authorized content; ask questions with
+numbered, page-aware citations; and manage sharing, collections, saved
+conversations, accounts, usage, budgets, and feedback.
 
-## Browser sign-in and refresh
+This README consolidates the former `docs/*.md` milestone guides and describes
+the checked-out implementation. Historical patch instructions are superseded:
+use the current files and migration scripts. This remains a local development
+application with production-hardening gaps; authentication and document ACLs
+are implemented, but they do not constitute a production security assessment.
 
-Email/password and invitation sign-ins use the existing revocable, 12-hour
-server sessions through a host-only HttpOnly, SameSite=Strict cookie. Refreshing
-restores the current account and role without putting a token in browser storage
-or the URL. Refresh does not extend the session. Expiry, account deactivation,
-role changes, administrator session revocation, and sign-out still apply.
-API-key sign-in remains memory-only and requires reconnecting after a refresh.
+## Contents
 
-The browser uses `POST /auth/browser/login`, `POST /auth/browser/register`,
-`GET /auth/session`, and `POST /auth/browser/logout`. Existing bearer login,
-registration, and API-key contracts remain available. Cookie-authenticated writes
-require the `X-RAG-CSRF: 1` header and same-origin request checks; do not enable
-credentialed cross-origin access without revisiting these protections.
+- [Architecture](#architecture)
+- [Daily startup](#daily-startup)
+- [Fresh installation and upgrades](#fresh-installation-and-upgrades)
+- [Configuration](#configuration)
+- [Using the application](#using-the-application)
+- [Authentication and authorization](#authentication-and-authorization)
+- [Document ingestion and PDF storage](#document-ingestion-and-pdf-storage)
+- [Retrieval and multilingual support](#retrieval-and-multilingual-support)
+- [Usage and credit budgets](#usage-and-credit-budgets)
+- [Personal credits and USDT payments](#personal-credits-and-usdt-payments)
+- [Saved conversations](#saved-conversations)
+- [Knowledge bases](#knowledge-bases)
+- [Answer feedback](#answer-feedback)
+- [Audit log and observability](#audit-log-and-observability)
+- [API reference](#api-reference)
+- [Worker operations and recovery](#worker-operations-and-recovery)
+- [Testing and evaluation](#testing-and-evaluation)
+- [Optional Docker deployment rehearsal](#optional-docker-deployment-rehearsal)
+- [Backups and rollback](#backups-and-rollback)
+- [Troubleshooting](#troubleshooting)
+- [Current limitations and improvement areas](#current-limitations-and-improvement-areas)
+- [Former milestone guides](#former-milestone-guides)
 
-Cookies require HTTPS outside loopback development (`localhost`, `127.0.0.1`,
-or `::1`). Reverse proxies must preserve the original Host, including its port,
-and pass the HTTPS scheme through a correctly configured, trusted proxy chain.
-No database migration is required for cookie sessions.
+## Architecture
 
-## Audit Log and multiple-file uploads
+| Component | Responsibility | Main files |
+| --- | --- | --- |
+| FastAPI API | Authentication, ingestion endpoints, authorized retrieval, generation, administration | `app/main.py`, `app/schemas.py` |
+| Retrieval and generation | Chunking, embeddings, vector/keyword search, fusion, reranking, provider calls | `app/chunking.py`, `app/embeddings.py`, `app/services.py`, `app/llm.py` |
+| Security and accounts | Tenant principals, document ACLs, passwords, invitations, sessions, browser transport | `app/security.py`, `app/account_auth.py`, `app/browser_auth.py`, `app/document_access.py` |
+| Ingestion worker | Claim queued files, revalidate uploader authorization, index, retry, finalize jobs | `scripts/ingestion_worker.py`, `app/ingestion_jobs.py` |
+| Administration and history | Usage ledger, credit reservations, conversations, collections, feedback, audit and metrics | Modules under `app/` with matching names |
+| PostgreSQL | Documents, chunks and 384-dimensional vectors, users, ACLs, jobs, sessions, accounting and history | `app/db.py`, `scripts/migrate_*.py` |
+| Private filesystem | Original PDFs, staged uploads, downloaded model weights | `.original_pdfs/`, `.ingestion_spool/`, model cache |
+| React frontend | URL navigation, assistant, PDF viewer, management tables and dashboards | `frontend/src/` |
 
-Administrators can open **Audit Log** at `/audit-log` to browse existing tenant
-audit records with user, action, and inclusive UTC date filters. Pagination uses
-20, 50, or 100 rows; filters and pages are stored in the URL. Deleted documents
-retain their recorded identifiers. The Dashboard's latest 10 events remain
-available. `GET /admin/audit-log` is read-only and requires a tenant administrator.
+An upload goes through validation, staging, a PostgreSQL-backed job, extraction,
+page-aware chunking, local embedding, and database storage. The API and worker
+are **separate processes**; neither Redis nor Celery is required.
 
-On Documents, writers can select multiple PDF, Markdown, and TXT files in one
-picker. Each file is validated separately (nonempty, supported extension, at most
-50 MB) and sent through the existing authenticated upload queue, one request at
-a time. An individual failure does not prevent later files from uploading;
-**Retry failed uploads** resubmits only failed files. Queued means accepted for
-background indexing; processing status appears in the document library.
-Keep Documents open until uploading finishes. Navigating away stops remaining
-uploads; already queued jobs continue. The selected-file list stays in memory
-and is cleared on refresh/sign-out. Neither feature requires a schema change.
+A question passes authentication and, for OpenRouter, configured budget checks.
+Retrieval applies tenant, document ACL, and optional collection filters in SQL
+before reranking or sending excerpts to the provider. The provider generates an
+answer with source numbers; the original PDF is fetched through an authorized
+endpoint when requested.
 
-## Requirements
+Embeddings and reranking run locally. Generation sends the question and retrieved
+excerpts to the configured remote provider. Review provider terms and your data
+policy before using confidential material.
 
-- Python 3.11 or 3.12 (64-bit recommended), Docker Desktop or Docker Engine + Compose
-- Internet access on the first embedding run to download the pretrained model
-- 4+ GB RAM recommended for a smooth local experiment
-- Optional: an OpenRouter or OpenAI API key, a supported model, and billing for `/ask`
+## Daily startup
 
-## 1. Unzip and start a terminal in this folder
+For an existing installation, use the existing database, environment, model
+configuration, and private storage. Do not repeat bootstrap, migrations, seeding,
+or re-embedding simply to start the application.
 
-On macOS/Linux, `cd enterprise-rag-starter`. On Windows, open a PowerShell terminal
-in that folder. All commands below run from the folder containing `docker-compose.yml`.
-
-## 2. Configure the environment
+From the project root, activate the virtual environment in **each Python
+terminal**:
 
 ```bash
-# macOS/Linux
-cp .env.example .env
-
-# Windows PowerShell
-# Copy-Item .env.example .env
+source .venv/bin/activate
 ```
 
-The example credentials are **local development only**.
+Ensure your existing PostgreSQL instance is running. Inspect `docker compose ps`
+or `docker ps` if it is containerized; do not create a replacement database or
+reset volumes.
 
-## 3. Start PostgreSQL with pgvector
+Start the API:
+
+```bash
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+Start the worker in a second terminal:
+
+```bash
+python -m scripts.ingestion_worker
+```
+
+Start React in a third terminal:
+
+```bash
+cd frontend
+npm run dev
+```
+
+Open [the application](http://127.0.0.1:5173) and
+[the API documentation](http://127.0.0.1:8000/docs).
+The frontend development server uses port 5173 and proxies `/api` to port 8000.
+
+FastAPI preloads the embedding model, and the reranker when rerank mode is
+selected. The worker preloads its own embedding model. Wait for startup readiness
+before uploading. Uvicorn's `--reload` restarts the API only; restart the worker
+separately after backend, model, or ingestion configuration changes.
+
+## Fresh installation and upgrades
+
+### Requirements
+
+- Python 3.12 is the project target; the existing setup also documents Python 3.11.
+- PostgreSQL 17 with pgvector, either an existing installation or Docker Compose.
+- Node.js 20.19+ or 22.12+ for the current Vite frontend.
+- Enough RAM and disk for PostgreSQL, model weights, API, worker, and document
+  processing. Four GB is a starting point for small experiments, not capacity
+  guidance for large PDFs or concurrent workloads.
+- Hugging Face access for uncached model downloads. Search does not require a
+  paid embedding API or an LLM key.
+- A configured OpenRouter or OpenAI key, supported model, and provider allowance
+  for nonempty-source answer generation.
+
+Commands below assume macOS/Linux and the project root
+`enterprise-rag-openrouter`. On Windows, activate with
+`.venv\Scripts\Activate.ps1`; use your installed Python 3.12 command.
+
+### Environment and dependencies
+
+Create a virtual environment only if needed:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+**Only when `.env` does not already exist**, copy `.env.example` to `.env`
+and edit it locally. Preserve existing credentials, paths, and model choices.
+The example database credentials are for local development only. Never commit
+the real file or put provider secrets in frontend `VITE_*` variables.
+
+For a **new local database**, review `docker-compose.yml`, confirm that its
+ports and volume will not conflict with an existing installation, then run:
 
 ```bash
 docker compose up -d
 docker compose ps
 ```
 
-## 4. Create a Python environment
+For an existing database, use its actual connection settings in `DATABASE_URL`.
+Do not assume a container name or replace an existing volume.
+
+Install frontend dependencies separately:
 
 ```bash
-python -m venv .venv
-
-# macOS / Linux
-source .venv/bin/activate
-
-# Windows PowerShell instead:
-# .venv\Scripts\Activate.ps1
-
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+cd frontend
+npm ci
 ```
 
-## 5. Initialize schema and insert sample documents
+Return to the project root before Python commands.
+
+### Schema initialization and migration order
+
+These commands change the database. On an existing installation, review the
+scripts and already-applied schema, obtain approval for the maintenance, take a
+backup, and stop the API and **all** workers first. Migrations are designed to
+be repeatable; they are not automatically run at API startup.
+
+For a fresh database, or an approved upgrade needing these migrations, use this
+dependency-safe order:
 
 ```bash
 python -m scripts.init_db
-python -m scripts.seed
+python -m scripts.migrate_security
+python -m scripts.migrate_accounts
+python -m scripts.migrate_ingestion_jobs
+python -m scripts.migrate_usage_ledger
+python -m scripts.migrate_credit_budgets
+python -m scripts.migrate_credits
+python -m scripts.migrate_conversations
+python -m scripts.migrate_knowledge_bases
+python -m scripts.migrate_answer_feedback
 ```
 
-The first seed run downloads `sentence-transformers/all-MiniLM-L6-v2`.
-It can take additional time. Rerunning seed is idempotent.
+| Script | Schema purpose and upgrade considerations |
+| --- | --- |
+| `init_db` | pgvector extension, documents, chunks, physical PDF page metadata and basic indexes. Requires sufficient database privileges. |
+| `migrate_security` | Tenants, users, hashed API keys, document ownership/ACLs and audit events. Backfills legacy unowned documents to `local/admin`; replaces global content deduplication with tenant/owner-scoped deduplication. Review legacy ownership before upgrading. |
+| `migrate_accounts` | Email/password/activation fields, expiring login sessions and invitation records. Existing API-key users need a password set separately. |
+| `migrate_ingestion_jobs` | Upload jobs, attempts, retry availability, heartbeats and queue indexes; older rows receive default attempt/availability values. |
+| `migrate_usage_ledger` | Persistent OpenRouter usage events with nullable provider costs. |
+| `migrate_credit_budgets` | Tenant/user monthly policies and request reservations. |
+| `migrate_credits` | Empty individual wallets, USDT orders, credit ledger, holds and callback receipts; sandbox/live balances are separate. No existing account is funded or historical usage changed. |
+| `migrate_conversations` | Private conversations and saved message/source snapshots. |
+| `migrate_knowledge_bases` | Collections and memberships, with composite foreign keys enforcing tenant consistency. |
+| `migrate_answer_feedback` | One current rating per saved assistant message, linked to its conversation. |
 
-## 6. Start the API
+Do not apply old milestone patch files over the current code. A database upgrade
+does not automatically reindex existing documents, reconstruct missing original
+PDFs, or backfill historical provider usage.
+
+### Bootstrap an administrator
+
+After the security and account migrations, create the initial local admin API
+key if you do not already have one:
 
 ```bash
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+python -m scripts.create_api_key --tenant local --user admin --role admin
 ```
 
-Then visit **http://127.0.0.1:8000/docs** and use Swagger's `Try it out`
-buttons on `/health`, `/documents`, `/search`, and `/ask`.
+The command creates missing tenant/user records, refuses a conflicting existing
+role, and prints the raw key **once**. Store it privately. The database stores a
+digest rather than the raw key. Never paste the key into source code, URLs, logs,
+screenshots, or chat.
 
-### Sample `/search` request
+For email/password browser sign-in, set the account's email and password using
+the interactive local operator command. Replace the example email:
+
+```bash
+python -m scripts.set_user_password --tenant local --user admin --email admin@example.com
+```
+
+The password is entered through a hidden prompt, not a command-line argument.
+This updates the password and revokes existing password sessions; API keys remain
+separate. Do not use it to overwrite an existing account casually.
+
+Optionally store the operator API key as `RAG_ADMIN_API_KEY` in your private
+environment for the seed, sample-reindex, and evaluation CLIs. It is not an
+anonymous API authentication bypass and is never needed in the frontend.
+
+For a fresh demo installation only, `python -m scripts.seed` ingests the four
+sample TXT documents using that admin principal. It writes to the database,
+loads/downloads the selected embedding model, and deduplicates repeated content
+for that owner. It is not a required startup step. Follow [Daily startup](#daily-startup)
+after setup.
+
+## Configuration
+
+Application settings are loaded from the process environment and `.env`.
+Environment variables already exported by the shell can take precedence; use
+consistent settings in API, worker, and maintenance terminals.
+
+| Setting | Meaning |
+| --- | --- |
+| `DATABASE_URL` | PostgreSQL connection URL; required for database operations. URL-encode special characters in credentials. |
+| `EMBEDDING_MODEL` | Default in code: `sentence-transformers/all-MiniLM-L6-v2`, 384 dimensions. Must match every stored embedding. |
+| `RERANKER_MODEL` | Default in code: `cross-encoder/ms-marco-MiniLM-L-6-v2`. Used in rerank mode. |
+| `RAG_RETRIEVAL_MODE` | `vector`, `hybrid`, or `rerank`. Code fallback is `vector`; `.env.example` selects `rerank`. |
+| `LLM_PROVIDER` | `openrouter` by default, or `openai`. |
+| `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | Private provider key and an available OpenRouter text model ID. |
+| `OPENAI_API_KEY`, `OPENAI_MODEL` | Used only for the direct OpenAI provider. |
+| `RAG_ADMIN_API_KEY` | Optional private operator credential for local maintenance/evaluation scripts. |
+| `RAG_INGEST_SPOOL` | Private staged-upload directory; defaults to project `.ingestion_spool`. Must agree between API and worker. |
+| `RAG_PDF_STORAGE_DIR` | Private original-PDF directory; defaults to project `.original_pdfs`. Must agree between API and worker. |
+| `HF_HOME` | Hugging Face cache root. Set a stable path, such as `.model_cache` when starting from the project root. Otherwise library defaults apply. |
+| `HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE` | A true value prevents download fallback; the complete selected models must already be cached. |
+| `RAG_OBSERVABILITY_ENABLED` | Defaults to enabled. False stops new in-process measurements; restarting clears previous process-local metrics. |
+| `RAG_PAYMENTS_MODE` | `disabled` (default), `sandbox`, or `live`. |
+| `RAG_WALLET_ENFORCEMENT` | `false` by default. `true` requires live payment mode and OpenRouter, and adds individual prepaid checks to existing monthly limits. |
+| `RAG_PAYMENTS_CALLBACK_BASE_URL` | Public HTTPS base URL, including `/api` when callbacks pass through the web proxy. Never inferred from a client-supplied Host header. |
+| `NOWPAYMENTS_SANDBOX_API_KEY`, `NOWPAYMENTS_SANDBOX_IPN_SECRET` | Private sandbox provider credentials. |
+| `NOWPAYMENTS_API_KEY`, `NOWPAYMENTS_IPN_SECRET` | Separate live credentials; configure after merchant eligibility is confirmed. |
+
+Choose model IDs and provider permissions appropriate to your account; example
+IDs are configuration examples, not guarantees of availability or pricing.
+Restart processes after configuration changes.
+
+OpenRouter uses the OpenAI-compatible Chat Completions API. The direct OpenAI
+branch uses the Responses API with `store=False`. Local retrieval is unchanged
+by the generation provider. OpenRouter usage accounting and credit budgets do
+not apply to the direct OpenAI branch.
+
+### Cached models and startup messages
+
+Normal API and worker commands first try `local_files_only=True`. A complete
+cache is loaded without online update checks. A missing cache can trigger a
+download when offline flags are not enabled. Keep the cache across restarts and
+make sure both processes use the same model/cache configuration.
+
+Each process must still load cached weights into RAM/GPU on every start.
+`Loading weights` progress and `using mps` on Apple Silicon describe loading and
+device selection; they do not by themselves indicate a download. The
+`Loaded model from local cache` log confirms a successful local load. Reloading
+the API or starting a second worker adds another model load and memory cost.
+
+## Using the application
+
+The sidebar/mobile navigation uses real links and browser History APIs. Direct
+URLs, refresh, and Back/Forward work. Internal return destinations survive
+sign-in and are checked against application routes. Admin-only destinations are
+checked in navigation and route handling, with backend authorization remaining
+authoritative. Unknown paths show a not-found view. Until a public landing page
+is added, `/` redirects to sign-in or Assistant.
+
+The application is constrained to the viewport: navigation and page headers
+remain stationary while each page's content scrolls. Navigating between pages
+preserves the mounted chat state; browser refresh restores the login session and
+allows saved conversations to be reopened, but does not preserve all unsaved UI
+state.
+
+| Route | Purpose |
+| --- | --- |
+| `/login` | Password sign-in, invitation registration, or API-key connection. |
+| `/assistant` | Ask questions, inspect numbered citations, view PDFs, manage saved conversations, choose collection scope and rate answers. |
+| `/documents` | Searchable library of indexed documents and queued, processing, or failed uploads; upload files and manage permitted documents. |
+| `/knowledge-bases` | Browse/manage collections of existing authorized documents. |
+| `/credits` | Personal balance, USDT top-ups, payment status and credit history; available to every signed-in role. |
+| `/dashboard` | Admin overview, OpenRouter usage, monthly budgets, and feedback analytics. |
+| `/users` | Admin user table and invitations. |
+| `/audit-log` | Admin searchable/filterable tenant audit history. |
+
+Documents has **Title, Date, Status, Assigned, Remove** columns, title/filename
+search, status and file-type filters, and 20/50/100-row server-side pagination.
+Filters and pagination are stored in URL query parameters. Newest items appear
+first with deterministic tie-breaking. Completed jobs resolve to indexed
+documents without duplicate rows; completed-job history cannot resurrect a
+deleted document. Admins see tenant-wide jobs; others see their own jobs plus
+documents they are authorized to read.
+
+The library polls in the background every 3.5 seconds while mounted, visible,
+and online. It retains current content and sharing drafts, prevents overlapping
+requests, and ignores obsolete responses. Ordinary refresh failures retain
+content with a stale/error indication. A reporting/filter selection change
+clears incompatible data; 401 signs out and 403 clears protected content.
+
+**Assigned** means sharing recipients. Owners with writer privileges and tenant
+admins can open the searchable multiselect access editor, grant/revoke multiple
+users, save, or cancel. Owner/admin automatic access cannot be removed through
+an ACL. Inactive accounts cannot receive new grants; existing grants can be
+reviewed/removed. Other document viewers receive a neutral label rather than
+recipient identities. Upload rows become assignable after indexing.
+
+User Management has **Username, Email, Role, Status, Created, Actions**, with
+username/email search, role/status filters and client-side pagination. It
+preserves invitation creation, role updates, activation controls and session
+revocation.
+
+Dashboard overview, usage, budgets and feedback load independently. Refresh
+actions are section-scoped and disabled while pending. Same-selection failures
+retain stale content; reporting-period changes do not show previous-period
+figures. Budget saves use the returned dashboard data directly, preserve other
+unsaved edits, and avoid overlapping reads/saves.
+
+## Authentication and authorization
+
+### Sign-in, sessions and invitations
+
+Password and invitation sign-ins use revocable, **12-hour** database sessions.
+Browser sessions use a host-only `rag_browser_session` cookie with HttpOnly,
+SameSite=Strict, and Secure outside loopback development. F5 restores the current
+account and role without exposing a token in browser storage or URLs. Refresh
+does not extend the expiry.
+
+API-key connection remains memory-only in the browser, so reconnect after F5.
+Bearer API-key and bearer password-session authentication remain supported for
+API clients. User activation and current role are checked against the database.
+Expiry, sign-out, deactivation, role changes, and administrator session revocation
+invalidate password sessions. Session revocation is distinct from API-key
+revocation; deactivation blocks both authentication forms.
+
+Passwords use salted PBKDF2-HMAC-SHA256 with 600,000 iterations. New passwords
+must contain 12–128 characters and at most 512 UTF-8 bytes. Registration is
+invitation-only: an admin creates a reader/editor invitation bound to an email;
+it expires after 48 hours and can be used once. Codes are shown once and must
+be delivered securely by the administrator; no email delivery service is built
+in. Initial admin setup uses the operator CLI.
+
+Cookie requests use `X-RAG-CSRF: 1`; cookie-authenticated writes and browser
+session endpoints enforce the applicable same-origin checks. No credentialed
+cross-origin CORS is enabled. The Vite proxy preserves Host, including port.
+An external HTTPS proxy must preserve the original Host and scheme through a
+correctly trusted proxy chain. Do not disable these checks to work around proxy
+configuration.
+
+Admin safeguards prevent self-deactivation/self-demotion and removal of the
+last active admin. Deactivation preserves owned documents and history; it is
+not account deletion or ownership transfer.
+
+### Permission model
+
+| Operation | Reader | Editor | Tenant admin |
+| --- | --- | --- | --- |
+| Read/search/ask/view original PDF | Owned or explicitly shared documents | Owned or explicitly shared documents | All documents in own tenant |
+| Upload/create documents | No | Yes, owned by uploader | Yes |
+| Reindex/share/revoke/delete document | No | Own documents only | Any document in own tenant |
+| See sharing recipients | No | Own documents only | Any document in own tenant |
+| Create/manage collections | Browse accessible collections | Create; manage own collections | Manage own tenant's collections |
+| Add/remove collection documents | No | Must manage collection and own document | Own tenant only |
+| Read saved conversations or rate answers | Own conversations only | Own conversations only | Own conversations only |
+| Dashboard/users/audit/usage/budgets/metrics | No | No | Own tenant only |
+
+New documents are private to their owner except for automatic same-tenant admin
+access. An ACL grants read access, not management rights. Tenant boundaries
+apply to vector and keyword candidate queries **before** reranking/provider
+calls. Knowledge-base membership never grants access. Source downloads and
+saved excerpts recheck authorization. Missing/unauthorized resources generally
+return 404 to avoid leaking their existence; missing credentials return 401.
+
+API keys are stored as digests. To revoke keys, a trusted database operator must
+identify the exact tenant/user/key record and revoke the intended active keys;
+there is no browser API-key management screen. Review the effect and preserve
+an authorized admin access path. Never print raw tokens for debugging.
+
+## Document ingestion and PDF storage
+
+### Upload limits and multiple files
+
+Writers can select multiple `.pdf`, `.md`, and `.txt` files. Each must be
+nonempty and at most **50 MiB (50 × 1024 × 1024 bytes)**. Markdown/TXT must decode
+as UTF-8 (a UTF-8 BOM is supported). PDFs must be readable, unencrypted, contain
+extractable text, and have at most **1,000 physical pages**. Extracted content
+must meet the minimum text validation; scanned/image-only files need external
+OCR. There is no OCR pipeline here.
+
+The asynchronous queue validates extension/size before staging; full extraction
+and PDF page/text checks happen in the worker. A queued response is acceptance,
+not successful indexing. The 1,000-page cap also applies to synchronous uploads
+and PDF reindexing. Physical page numbering includes blank pages and is kept
+for citations. Restart API and worker after ingestion code changes; previously
+failed files require a new upload rather than automatic history modification.
+
+The UI uploads one selected file per request, sequentially. A per-file error
+does not stop later files; **Retry failed uploads** retries failed submissions.
+Keep Documents open until submissions finish. Navigation stops remaining
+submissions; already accepted jobs continue. File selections live in memory
+and clear on refresh/sign-out. A submission retry does not itself requeue an
+already accepted job that later failed processing.
+
+Synchronous JSON ingestion accepts a title of 2–200 characters and text of
+20–200,000 characters. File ingestion uses its own byte/page/text validation;
+the JSON body text limit is not a separate total extracted-PDF character cap.
+
+Content deduplication is tenant/owner-scoped. A repeat can return
+`already_exists=true` with the existing document. Confirm destructive document
+deletion and failed-upload removal separately. Queued/processing jobs cannot
+be removed. Failed-job deletion locks/rechecks the row, requires its writer
+owner or a same-tenant admin, and retains the record if staged-file cleanup
+fails.
+
+### Original PDFs and citations
+
+Original bytes live privately under `RAG_PDF_STORAGE_DIR`, normally
+`.original_pdfs/{document_id}.pdf`. API and worker must use the same location.
+Never expose this directory through static hosting, Vite public assets, or
+unauthenticated file URLs.
+
+`GET /documents/{document_id}/original-pdf` requires authorized document access.
+The browser fetches bytes with authentication, creates a temporary blob URL,
+and opens the requested physical page in the viewer. No API key is embedded
+in the PDF URL; the blob URL is revoked when the viewer closes.
+
+Documents indexed before original-byte storage may be searchable without an
+available original PDF. An authorized owner/admin can replace/reindex the PDF
+using the matching filename while retaining its document ID; a duplicate PDF
+upload can also repair missing stored bytes. Reindexing changes chunks/vectors
+and must be treated as an intentional data change.
+
+PostgreSQL transactions and filesystem writes are not one atomic transaction.
+A crash can leave indexed text without original bytes. A database-only backup
+does not back up original PDFs; see [Backups and rollback](#backups-and-rollback).
+
+## Retrieval and multilingual support
+
+### Retrieval modes
+
+- **vector:** pgvector cosine similarity over authorized embeddings.
+- **hybrid:** authorized vector candidates plus PostgreSQL full-text candidates,
+  fused by reciprocal rank fusion.
+- **rerank:** hybrid candidates followed by a local cross-encoder.
+
+Hybrid/rerank candidate pools use `max(40, top_k × 5)` per branch; vector-only
+retrieval requests `top_k` candidates. RRF uses `k=60`. Public search
+inputs accept 3–2,000-character questions and `top_k` from 1 to 10 (default 3).
+Returned similarity remains a cosine-similarity value; it is not a calibrated
+answer-confidence score. Keyword matching uses PostgreSQL full-text search,
+not a claim of BM25 scoring.
+
+An optional full-text GIN index is supplied in
+`scripts/sql/create_fts_index.sql`. Review database size, locking and maintenance
+approval before applying it. The current local exact vector path does not imply
+a production ANN index or tested large-corpus throughput.
+
+### Chinese documents and questions
+
+Han-containing text is chunked without requiring spaces, targeting 256
+characters; long Latin words retain the caller's original character bound.
+English-only chunking is unchanged. PDF page metadata and permissions remain
+intact; Chinese image-only PDFs still need OCR.
+
+For Chinese questions, the implicit default vector path adds literal keyword
+candidates using bounded overlapping Han bigrams and Latin words. Explicit
+`mode="vector"` calls stay vector-only. Terms are bounded to 64 and passed as SQL
+parameters. Both candidate branches retain tenant, ACL and collection filters.
+The literal branch scans authorized content without a new index; profile large
+libraries. It does not provide synonym translation or conversion between
+Simplified and Traditional scripts.
+
+Generation instructions request the question's language/script and grounded
+numbered citations. Empty-source Han questions receive a local Chinese response.
+Actual multilingual quality depends on the models and corpus; test your own
+authorized examples.
+
+The English embedding/reranker **code defaults** remain for compatibility.
+The supported multilingual configuration is:
+
+```dotenv
+EMBEDDING_MODEL=intfloat/multilingual-e5-small
+RERANKER_MODEL=cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
+RAG_RETRIEVAL_MODE=rerank
+HF_HOME=.model_cache
+```
+
+E5 receives required `query: ` and `passage: ` prefixes automatically, including
+for non-English text. Both the original and multilingual embedding choices use
+384 dimensions. **Equal dimensions do not make their vector spaces compatible.**
+Never change an existing corpus's embedding model without rebuilding all stored
+vectors. The application does not automatically verify a database model version.
+
+### Changing embedding models safely
+
+For a fresh empty database, choose a compatible 384-dimensional model before
+ingestion. For an existing corpus, obtain approval for a full embedding
+replacement and use a maintenance window:
+
+1. Evaluate the proposed model. The local synthetic commands below load public
+   model weights and use six toy Chinese/English/cross-language queries; they
+   access neither the database nor a generation provider.
+2. Run the read-only re-embedding plan. It counts documents/chunks across all
+   tenants without loading weights or printing document content.
+3. Take an approved database backup and stop **both API and all workers**.
+   Re-run the plan and review its current counts.
+4. Apply using the reviewed chunk count as `N`. The command validates the
+   target model before locking, rechecks the count under table locks, and
+   updates all batches in one transaction. Failure rolls back the updates.
+5. Configure both services with the same new embedding model, set the desired
+   compatible reranker/mode, then restart. Do not run concurrent ingestion,
+   reindexing, deletion, or old-model queries during the transition.
+
+```bash
+python -m scripts.evaluate_chinese
+python -m scripts.evaluate_chinese --reranker-model cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
+python -m scripts.reembed_chunks
+# Only after approval, backup and stopping services; replace N with reviewed count:
+python -m scripts.reembed_chunks --apply --expected-chunks N --confirm-services-stopped
+```
+
+The migration command defaults to multilingual E5 and supports an explicit
+`--model`. It changes only `chunks.embedding`, across all tenants; document and
+chunk IDs, text, physical pages, ACLs and conversation references remain.
+It does not rechunk older Chinese documents. The services-stopped flag is an
+operator assertion, not automatic process detection.
+
+To roll back, stop services, re-embed with the previous `--model` and restore
+the old configuration after approval, or restore a reviewed compatible backup.
+Do not simply switch `.env` back while new-model vectors remain.
+
+After a successful migration, the normal startup commands use the configuration
+above. An optional launcher forces multilingual E5, the multilingual reranker,
+rerank mode, the absolute project `.model_cache`, and offline loading:
+
+```bash
+.venv/bin/python -m scripts.run_multilingual api --host 127.0.0.1 --port 8000 --reload
+.venv/bin/python -m scripts.run_multilingual worker
+```
+
+It preserves provider/authentication settings and forwards service arguments,
+signals and exit codes without editing `.env`. It requires cached weights and
+matching migrated vectors; it does not inspect the database model version.
+
+## Usage and credit budgets
+
+### Persistent OpenRouter usage
+
+The admin dashboard reports this application's recorded OpenRouter usage by
+tenant/user: tracked all-time totals, current UTC calendar week (Monday start),
+and daily 7/30-day charts including today's partial UTC day. It records model,
+input/output tokens and provider-reported cost when present, without prompts,
+excerpts or raw provider payloads.
+
+Unreported cost is stored as NULL and shown as **unreported**, never free usage.
+Cost coverage helps explain incomplete totals. Decimal credit amounts are JSON
+strings to preserve precision; graph rendering is approximate. This is neither
+the full OpenRouter account balance nor authoritative provider billing. It has
+no historical backfill, excludes other applications and direct OpenAI requests,
+and can underreport if a ledger write fails.
+
+### Monthly credit guardrails
+
+Tenant admins set optional tenant/user monthly limits, pause policies, and a
+per-request reservation (default `0.01` credits). A blank limit means unlimited;
+zero blocks new budgeted generation. Windows start at 00:00 UTC on the first day
+of the month.
+
+Configured OpenRouter policies reserve allowance **before retrieval and
+generation** using a per-tenant PostgreSQL transaction advisory lock. Concurrent
+requests see pending reservations. Policy changes use the same locking model.
+A blocked request returns 429 without contacting the provider; `/search`
+remains available.
+
+- Retrieval failure or empty sources: no provider generation occurs, the unused
+  reservation is released, and no generation usage event is recorded.
+- Attempted generation with a reported cost: usage settlement and reservation
+  release are atomic.
+- Attempted generation without reliable cost, including possible provider
+  failure: retain an unknown-cost hold for review.
+- Settlement failure: keep the hold rather than silently releasing allowance.
+
+Before any budget policy is configured, the existing usage-ledger path operates
+without reservations. Direct OpenAI generation bypasses these OpenRouter-only
+policies. Reservations count against their creation month.
+
+The reservation is an estimate: actual cost can exceed it and push spending
+over the configured limit. Use appropriate provider-key limits and generation
+output bounds as additional controls. Application limits are not a hard
+provider billing cap.
+
+A trusted operator can inspect uncertain holds using read-only SQL:
+
+```sql
+SELECT id, tenant_id, user_id, status, reserved_credits, created_at
+FROM credit_reservations
+WHERE status IN ('reserved', 'unknown')
+ORDER BY created_at DESC
+LIMIT 30;
+```
+
+Reconcile uncertain charges against provider billing before any approved manual
+adjustment. Do not casually delete historical holds or reinterpret missing costs
+as zero. To disable budget enforcement intentionally, review pending activity,
+clear tenant/user limits and unpause policies; preserve the accounting history.
+
+## Personal credits and USDT payments
+
+Every user has an individual tenant-scoped wallet. Monthly admin budgets remain
+separate controls; purchasing credit does not raise or unpause them. Credit cards
+are not implemented. Payments and prepaid enforcement are disabled by default.
+
+### Pricing and confirmation
+
+One usable credit covers US$1 of reported OpenRouter provider cost. Purchases add
+a **5.5% service fee**, rounded half-up to the nearest cent: $10 credit costs
+$10.55; $25 costs $26.38; $100 costs $105.50. No further application markup is
+added when answers consume credit. Gateway processing/merchant settlement fees
+come out of that surcharge; the sender's wallet/exchange may charge its own
+network fee. Top-ups support $10–$1,000 with at most two decimal places; the
+provider can impose higher network-specific minimums.
+
+The Credits page requests a fixed-rate USDT payment through NOWPayments and
+shows the exact amount, network, address and quote expiry. Supported network
+choices are Tron (TRC-20), BNB Smart Chain (BEP-20), and Ethereum (ERC-20), subject
+to provider availability. Do not assume USDT is always exactly US$1. Do not send
+funds to another network, an expired quote, or a sandbox address. Once payment
+is detected, the UI tells you to wait rather than send again.
+
+Creating an order grants no credit. Callbacks require the mode-specific
+HMAC-SHA512 signature. Completed/refunded events are also checked against the
+provider API. Order/payment identity, USD price, network and quoted crypto amount
+must match. Only fully paid `finished` payments credit the purchased usable
+amount. Partial/inconsistent payments require review. Duplicate/concurrent
+callbacks and manual checks cannot credit an order twice; delayed events cannot
+downgrade credited/refunded orders. Verified full refunds reverse the original
+credit once. Partial refunds require operator reconciliation; the application
+does not initiate crypto refunds/payouts. Refunding spent credit can create a
+negative balance that blocks new reservations.
+
+Checkout request keys are bound to user, amount and network. Retries with the
+same key reuse the existing order. Provider POSTs are not retried automatically:
+a timeout may already have created a payment. Such orders require review in the
+provider dashboard using the app's order UUID. Five creation attempts per
+user/mode in 15 minutes limit accidental repeats. General distributed rate
+limiting is separate work.
+
+Payment and credit histories are independently paginated (20/50/100 rows).
+Pending orders refresh from application storage every five seconds while visible
+and online. **Check status** retrieves the provider state and can recover missed
+callbacks. Creation failures without a stored provider payment ID need operator
+review; after locating the matching payment, request an IPN resend from the
+provider dashboard to reconcile it without manually editing balances. No
+prompt/document content is sent to the payment provider.
+
+### Setup and rollout
+
+After a backup and stopping API/workers for approved maintenance, run the
+repeatable migration (requires security, accounts and credit-budget migrations):
+
+```bash
+python -m scripts.migrate_credits
+```
+
+This creates five tables/indexes without funding accounts or rewriting existing
+usage, reservations, documents or sessions. The API never runs it automatically.
+
+Start in sandbox using private configuration; do not share credentials or commit
+them. Existing `.env` files are never edited automatically:
+
+```dotenv
+RAG_PAYMENTS_MODE=sandbox
+RAG_WALLET_ENFORCEMENT=false
+RAG_PAYMENTS_CALLBACK_BASE_URL=https://your-test-host.example/api
+NOWPAYMENTS_SANDBOX_API_KEY=
+NOWPAYMENTS_SANDBOX_IPN_SECRET=
+```
+
+Use a NOWPayments sandbox account/key and IPN secret. The adapter uses
+`https://api-sandbox.nowpayments.io/v1/payment` and the sandbox `success` case,
+never the live host. Callbacks go to `/payments/nowpayments/sandbox/ipn`, with
+`/api` prepended when using the frontend proxy. External callbacks require a
+reachable public HTTPS endpoint; loopback alone is insufficient. Restart the API,
+create a test payment at `/credits`, and verify exactly one test credit/ledger
+entry. **Never send real crypto in sandbox.** Test balances are isolated and
+cannot fund actual provider calls. Mocked tests are not proof of live sandbox or
+network compatibility; verify the provider flow before activation.
+
+Live activation is a separate operator step after merchant eligibility, fees,
+callbacks and reconciliation are verified. Configure the separate live key and
+IPN secret, set `RAG_PAYMENTS_MODE=live`, and set `RAG_WALLET_ENFORCEMENT=true`
+when paid balances should become mandatory. New users start at zero; historical
+usage is not charged retroactively. User payments fund the app wallet, not the
+OpenRouter account itself; the operator must maintain provider funding.
+
+With enforcement enabled, wallet and monthly holds share the same database
+transaction before retrieval. Retrieval failures/empty sources release unused
+holds. Reported costs debit the wallet, record usage and release holds atomically;
+missing costs retain holds. Wallet holds do not expire at a month boundary.
+Actual cost can exceed the reservation: the full cost is recorded, a negative
+balance is allowed, and further reservations are blocked. Enforcing prepaid
+usage with direct OpenAI or sandbox mode fails closed.
+
+For rollback, review pending/unknown holds and settle in-flight work before
+switching modes/code. Do not delete wallets, receipts or ledger history. Set
+`RAG_PAYMENTS_MODE=disabled` and `RAG_WALLET_ENFORCEMENT=false` to stop new
+purchases/deductions. Preserve credentials and callback processing for outstanding
+payments: existing signed callbacks can still settle their original mode's orders.
+
+Provider references: [API](https://documenter.getpostman.com/view/7907941/S1a32n38),
+[callback verification](https://nowpayments.zendesk.com/hc/en-us/articles/21395546303389-IPN-and-how-to-setup),
+and [fees](https://nowpayments.io/help/about-nowpayments/about/what-are-your-fees).
+
+## Saved conversations
+
+Assistant supports new, reopen, rename and delete. Conversations and messages
+belong to one user in one tenant; administrators do not gain access to other
+users' private chats. `/ask` remains stateless; saved questions use
+`/conversations/{id}/ask` through the same retrieval, budget and generation path.
+
+Saved messages include answer/source snapshots and physical PDF pages.
+Authorization is rechecked when history is read. When a referenced document is
+no longer accessible, the affected answer and excerpts are redacted; the
+question can remain visible. This prevents revoked sources leaking through old
+history. Deleting a conversation cascades its messages and feedback.
+
+Saved history is **not multi-turn generation memory**: a new response uses the
+current question and retrieved sources rather than the whole preceding chat.
+The listing is capped at 100 recent conversations, and details load the latest
+100 messages; history pagination is not implemented.
+
+History is not application-encrypted at rest. Apply database backup/access and
+retention policies. A provider call can incur cost before a subsequent message
+save fails; blind retries may cause another paid call. End-to-end generation
+idempotency is not implemented.
+
+## Knowledge bases
+
+Knowledge bases organize existing documents in tenant-scoped collections. They
+are a retrieval filter, never a permission grant. `knowledge_base_id=null`
+means all accessible documents.
+
+Admins/editors create collections. Their creator and tenant admins can manage
+them. Adding/removing a document also requires document ownership or tenant
+admin authority; having read access to someone else's document is insufficient.
+Readers can browse/select collections containing documents accessible to them.
+
+Select a collection in Assistant to scope new questions, including new questions
+inside existing conversations. Historical snapshots are unchanged and still
+recheck document access. The selection is not persisted as a browser preference
+across refreshes. Foreign-tenant/nonexistent collection IDs are rejected before
+embedding/provider work. Composite database foreign keys also prevent
+cross-tenant memberships.
+
+Deleting a collection removes memberships, not the documents. Document deletion
+cascades its memberships.
+
+## Answer feedback
+
+Users can thumbs-up/down their own saved assistant answers, optionally giving a
+downvote reason: `incorrect`, `incomplete`, `irrelevant`, `outdated`, or
+`other`. They can update or remove the rating. One current vote is stored per
+message, with an updated timestamp; it is not an append-only event ledger.
+
+Feedback requires conversation ownership and continued source access. Revoked
+sources hide/block affected feedback. Conversation deletion cascades ratings.
+Admin analytics expose tenant aggregate counts, daily trends, reasons and
+limited recent downvote metadata, not private question/answer text or excerpts.
+
+Reports cover all recorded history plus a selected 7/30 UTC-day window including
+today. Sentiment is a quality signal, not a factual correctness score or
+automatic retrieval evaluation.
+
+## Audit log and observability
+
+### Persistent audit log
+
+Admins can browse `/audit-log` with user, action and inclusive UTC date filters,
+20/50/100-row pagination and URL query state. The dashboard also shows its latest
+10 events. The API is `GET /admin/audit-log` with `page`, `page_size`,
+`user_id`, `action`, `date_from` and `date_to`.
+
+Audit records are tenant-scoped and contain action/identity/document identifiers,
+timestamps and applicable result counts. Deleted documents retain recorded IDs.
+Audit logging avoids raw keys, passwords, prompts and document excerpts.
+This browsing endpoint is read-only; searches themselves can create audit rows.
+
+### Process-local performance metrics
+
+`GET /observability` is admin-only and tenant-scoped. It reports search/ask
+retrieval and generation calls, errors/error rates, latency mean/p50/p95, and
+observed provider tokens/costs. Latency percentiles use at most the latest 256
+samples per phase; the process tracks at most 1,000 tenants.
+
+These metrics reset on API restart/reload, are not shared between API processes,
+and do not include the separate worker's process. They are not durable billing
+records. `RAG_OBSERVABILITY_ENABLED=false` stops new measurements without
+erasing already collected values until restart.
+
+HTTP middleware returns `X-Request-ID` and logs a generated request ID, method,
+route template, status and elapsed time. It does not intentionally log request
+bodies, authorization headers, prompts, excerpts or raw query strings. Keep
+custom proxy/server logging equally restrictive.
+
+`GET /ingestion-health` gives admins tenant job counts and processing jobs
+whose heartbeat is older than ten minutes. It exposes no document contents or
+filenames and does not prove that a worker is alive when the queue is idle.
+
+## API reference
+
+Backend paths below have **no `/api` prefix** at port 8000. Browser requests use
+`/api` through Vite/Nginx. FastAPI's `/docs` and `/openapi.json` describe the
+exact request/response schemas. Except for health, authentication entry points,
+API documentation and provider-signed payment callbacks, application routes
+require a valid principal.
+
+API clients send `Authorization: Bearer <API-key-or-session-token>`. Browser
+cookie clients use same-origin credentials and `X-RAG-CSRF: 1` as described
+above. Do not put credentials in URLs.
+
+| Methods and paths | Purpose / access |
+| --- | --- |
+| `GET /health` | Public database readiness; 503 if unavailable. Not a full worker/provider test. |
+| `GET /me` | Current public identity; no key material. |
+| `GET /credits` | Own selected-mode balance, held/available credits and non-secret payment settings. |
+| `GET /credits/orders`, `GET /credits/transactions` | Own paginated payments/ledger; page/page_size (20/50/100). Admins cannot browse another user's wallet. |
+| `POST /credits/orders` | Create a USDT payment using credits (decimal string), network and request_key (UUID); server determines identity and price. |
+| `POST /credits/orders/{order_id}/check` | Owner retrieves provider status and reconciles missed callbacks. |
+| `POST /payments/nowpayments/{mode}/ipn` | Provider-signed public callback, not user-session authentication; sandbox/live modes, bounded body and transactional replay protection. |
+| `POST /auth/login`, `POST /auth/register` | Bearer-session login or invitation registration. Login: email/password; registration also needs username/invitation_code. |
+| `POST /auth/logout` | Revoke the supplied session. |
+| `POST /auth/browser/login`, `POST /auth/browser/register` | Same account flows with HttpOnly cookie, no session secret in response JSON. |
+| `GET /auth/session`, `POST /auth/browser/logout` | Restore/revoke browser session with browser request checks. |
+| `POST /documents` | Writer JSON ingestion: title/text; creates private owned document. |
+| `GET /documents` | Existing visible indexed-document list contract. |
+| `GET /documents/library` | Combined authorized library; page/page_size/q/status/file_type. Status: indexed/queued/processing/failed; file type: pdf/md/txt; page size: 20/50/100. Returns items, total, page, page_size, pages. |
+| `POST /documents/upload` | Writer synchronous multipart upload using field `file`. |
+| `POST /documents/upload-async` | Writer multipart queue submission; 202 with job identity/status. |
+| `POST /documents/{document_id}/reindex-pdf` | Authorized writer owner/admin replaces/reindexes matching PDF via multipart `file`. |
+| `GET /documents/{document_id}/original-pdf` | Authorized reader fetches private PDF bytes. |
+| `GET /documents/{document_id}/access` | Writer owner/admin gets same-tenant candidate/recipient states. |
+| `PATCH /documents/{document_id}/access` | Writer owner/admin updates `grant_user_ids` and `revoke_user_ids` arrays. |
+| `POST /documents/{document_id}/share` | Existing single-username grant contract. |
+| `DELETE /documents/{document_id}` | Writer owner/admin deletes document, chunks/memberships and stored PDF. |
+| `GET /ingestion-jobs`, `GET /ingestion-jobs/{job_id}` | Job visibility: owner, or same-tenant admin. |
+| `DELETE /ingestion-jobs/{job_id}` | Failed jobs only, writer owner/admin; 409 if status is not failed, 503 on staged cleanup failure with record retained. |
+| `POST /search`, `POST /ask` | Authorized search or grounded generation. Body: question, top_k, optional knowledge_base_id. |
+| `GET /conversations`, `POST /conversations` | List/create current user's conversations; creation accepts a title. |
+| `GET /conversations/{id}`, `PATCH /conversations/{id}`, `DELETE /conversations/{id}` | Own conversation detail, title change, deletion. |
+| `POST /conversations/{id}/ask` | Save question/answer/sources in own conversation. Same body as ask. |
+| `GET /conversations/{id}/feedback` | Own accessible answer ratings. |
+| `PUT /conversations/{id}/messages/{message_id}/feedback`, `DELETE /conversations/{id}/messages/{message_id}/feedback` | Set rating to `"up"` or `"down"` with optional downvote reason, or remove vote. |
+| `GET /knowledge-bases`, `POST /knowledge-bases` | List visible collections; writer creates with name/description. |
+| `PATCH /knowledge-bases/{id}`, `DELETE /knowledge-bases/{id}` | Collection creator/admin updates name/description or deletes collection. |
+| `GET /knowledge-bases/{id}/documents` | Accessible member documents. |
+| `PUT /knowledge-bases/{id}/documents/{document_id}`, `DELETE /knowledge-bases/{id}/documents/{document_id}` | Manage membership with collection and document authority. |
+| `GET /admin/dashboard` | Tenant admin overview/latest audit events. |
+| `GET /admin/users`, `PATCH /admin/users/{user_id}` | Admin user list and role/is_active update. |
+| `POST /admin/users/{user_id}/revoke-sessions` | Admin revokes target user's password sessions. |
+| `GET /admin/invitations`, `POST /admin/invitations` | Admin lists/creates invitations with email and reader/editor role; new code shown once. |
+| `GET /admin/usage?days=30` | Tenant OpenRouter usage; days accepts 7 or 30. |
+| `GET /admin/budgets` | Tenant/user policies and current monthly accounting. |
+| `PUT /admin/budgets/tenant` | monthly_limit_credits (decimal string/null), paused, reservation_credits (decimal string). |
+| `PUT /admin/budgets/users/{user_id}` | monthly_limit_credits (decimal string/null), paused; returns updated budget dashboard. |
+| `GET /admin/feedback?days=30` | Tenant aggregate feedback quality signals; days accepts 7 or 30. |
+| `GET /admin/audit-log` | Filtered/paginated tenant audit records. |
+| `GET /ingestion-health`, `GET /observability` | Tenant admin queue health / process-local performance metrics. |
+
+Example JSON for authenticated `POST /search`, `POST /ask`, or saved ask:
 
 ```json
 {
   "question": "My VPN login is failing. What should I check?",
-  "top_k": 3
+  "top_k": 3,
+  "knowledge_base_id": null
 }
 ```
 
-### Sample `/documents` request
+Example JSON for a writer's `POST /documents`:
 
 ```json
 {
@@ -130,80 +918,309 @@ buttons on `/health`, `/documents`, `/search`, and `/ask`.
 }
 ```
 
-## 7. Enable LLM responses through `/ask` (OpenRouter default)
+A source includes its source_number, document_id, title, chunk_index, content,
+cosine similarity and optional physical page_number. Numbered citations connect
+answers to these authorized excerpts; citation presence is not machine-verified
+factual correctness.
 
-1. Create an OpenRouter API key at https://openrouter.ai/settings/keys.
-2. In `.env`, keep `LLM_PROVIDER=openrouter` and fill `OPENROUTER_API_KEY`.
-3. Start with `OPENROUTER_MODEL=google/gemini-3.1-flash-lite`, or replace it
-   with any currently available text model ID from https://openrouter.ai/models.
-4. Restart the API process and call `/ask` with the same JSON as `/search`.
+Use Swagger's **Authorize** control with your bearer credential for protected
+examples. The frontend's `/documents` page and FastAPI's `/docs` API explorer
+are different URLs.
 
-The OpenAI Python package is used to call OpenRouter's OpenAI-compatible **Chat
-Completions** endpoint. The database, embeddings, and `/search` are unchanged.
+## Worker operations and recovery
 
-To switch to the direct OpenAI API instead, set `LLM_PROVIDER=openai`, fill
-`OPENAI_API_KEY`, choose an available `OPENAI_MODEL`, and restart the API. The
-direct OpenAI branch uses the **Responses API** with `store=False`.
+The normal worker command polls every two seconds. `--poll-seconds` accepts
+0.2–60. `--once` processes at most one eligible job and exits: it can change
+documents/jobs and is not a read-only health probe.
 
-For the initial milestone **you do not need an LLM API key**. `/search` works
-with local embeddings and pgvector only. Do not paste API keys into chat, code,
-or git. Monitor model rates and credit usage.
+Before processing, the worker checks that the uploader still exists, is active,
+has an editor/admin role, and belongs to the job's tenant. A no-longer-authorized
+job is finalized as failed rather than indexed. If finalization fails, staged
+input is retained for safe investigation/recovery.
 
-**Security limitation:** Prompts include retrieved document excerpts, which
-are sent to the chosen cloud provider. This prototype has no authentication,
-access control, data classification, or machine-validated citations. Use public
-or synthetic sample documentation only.
+Temporary connection/timeout failures receive at most **three total attempts**,
+with 15-second then 30-second retry delays. Retry status is queued, with next
+availability recorded and staged input retained. Permanent validation failures
+become failed; successful and finalized permanent jobs normally remove staged
+input. Database failure during finalization retains input.
 
-
-## 8. Explore the SQL
-
-```bash
-docker compose exec postgres psql -U raguser -d ragdb
-```
-
-Inside `psql`:
-
-```sql
-SELECT extversion FROM pg_extension WHERE extname='vector';
-SELECT id, title FROM documents ORDER BY id;
-SELECT id, document_id, chunk_index, LEFT(content,80) FROM chunks;
-SELECT c.id, d.title, 1 - (c.embedding <=> (SELECT embedding FROM chunks ORDER BY id LIMIT 1)) AS similarity
-FROM chunks c JOIN documents d ON d.id = c.document_id
-ORDER BY c.embedding <=> (SELECT embedding FROM chunks ORDER BY id LIMIT 1)
-LIMIT 5;
-```
-
-## 9. Run basic tests
+Active jobs heartbeat every 15 seconds. A stale heartbeat can indicate a crash
+or a database outage; age alone does not prove the process is dead. After
+investigation, preview stale-job recovery without database writes:
 
 ```bash
-python -m pytest -q
+python -m scripts.recover_ingestion_jobs --older-than-minutes 10
 ```
 
-These are isolated unit tests. They do not assert that Docker, the embedding
-model download, the DB connection, or the OpenRouter/OpenAI API work end to end.
+For approved recovery, stop **all ingestion workers**, confirm no process can
+continue indexing, and then apply:
+
+```bash
+python -m scripts.recover_ingestion_jobs --older-than-minutes 10 --confirm --workers-stopped
+```
+
+Present staged input with fewer than three attempts is requeued. Missing input
+or exhausted attempts becomes failed. Exhausted staged files remain for reviewed
+operator cleanup. The threshold must be at least five minutes; prefer the
+default ten rather than reclaiming recently active work.
+
+The spool directory is private (0700) with staged files 0600. Monitor disk space
+and filesystem access. Do not delete staged files belonging to active jobs.
+Processing is not exactly-once: deduplication mitigates a crash between document
+commit and job completion, but recovery can repeat work. Never reclaim a job
+while an old worker may still be running.
+
+## Testing and evaluation
+
+### Automated checks
+
+From the project root with the virtual environment active:
+
+```bash
+python -m pytest tests/ -q
+git diff --check
+```
+
+From `frontend/`:
+
+```bash
+npm test
+npm run build
+```
+
+Python tests mock database/provider/model operations where appropriate and use
+temporary files for ingestion. Frontend tests use Vitest/Testing Library with
+jsdom. They cover authorization, tenant boundaries, budgets/settlement,
+conversations, collections, feedback, sharing, navigation, polling and management
+UI. Passing these suites does not establish live PostgreSQL, provider billing,
+model download, browser rendering, or deployment correctness.
+
+For production-build verification without updating existing TypeScript build
+state/output, run from `frontend/` on macOS/Linux:
+
+```bash
+build_dir=$(mktemp -d)
+npx tsc -p tsconfig.app.json --noEmit --incremental --tsBuildInfoFile "$build_dir/app.tsbuildinfo"
+npx tsc -p tsconfig.node.json --noEmit --incremental --tsBuildInfoFile "$build_dir/node.tsbuildinfo"
+npx vite build --outDir "$build_dir/dist"
+```
+
+The output stays in a separate temporary directory for review; remove it only
+when no longer needed. No runtime data needs to be changed for automated tests.
+Manual upload/share/delete tests should use approved disposable documents and
+accounts, never live private records.
+
+### Retrieval evaluation
+
+`scripts.evaluate_rag` compares authorized retrieval against
+`evaluation/questions.json`, using the operator `RAG_ADMIN_API_KEY`.
+The bundled eight cases refer to the four sample TXT files and
+`incident-response.pdf`; upload that fixture separately if using the PDF cases.
+Do not assume a particular document ID or physical page number in another
+database. Use a dataset matching your authorized corpus.
+
+```bash
+python -m scripts.evaluate_rag --retriever vector --warmup --top-k 5 --output evaluation/results-vector.json
+python -m scripts.evaluate_rag --retriever hybrid --warmup --top-k 5 --output evaluation/results-hybrid.json
+python -m scripts.evaluate_rag --retriever rerank --warmup --top-k 5 --output evaluation/results-rerank.json
+```
+
+`--dataset` accepts a JSON case list. Each case has nonempty string fields `id`,
+`question`, `expected_title`, and `evidence_contains`, plus an optional
+`expected_answer_terms` string array. Retrieval-only runs
+make no generation calls and do not alter documents/schema, but searches can
+write audit events. Model downloads/cache writes may occur. Warmup runs one
+untimed retrieval for comparable steady-state measurements.
+
+Reported metrics include document Recall@k against the expected title, exact
+case-insensitive evidence matching within a chunk, reciprocal rank of the first
+evidence hit, and retrieval wall-clock p50/p95. These are small-dataset proxies,
+not broad quality guarantees.
+
+`--answers` additionally calls the configured provider, sends retrieved
+excerpts, incurs possible charges and writes generated answers into reports.
+This operator CLI calls generation directly rather than the HTTP
+reservation/settlement wrapper; do not use it to test API budget enforcement
+or expect dashboard accounting for these calls. Answer metrics check numeric
+citation references, evidence-citation proxies and expected-term coverage;
+they do not prove semantic correctness.
+
+Reports can contain sensitive generated content; keep them private and out of
+Git. Existing results/answers/baseline report patterns under `evaluation/` are
+ignored, but use care with custom output names. The local Chinese smoke commands
+in [Changing embedding models safely](#changing-embedding-models-safely) avoid
+both database access and paid generation.
+
+## Optional Docker deployment rehearsal
+
+`deploy/compose.yaml` is an optional single-machine rehearsal, not an assumed
+existing deployment or an Internet-facing production stack. It runs API, worker
+and Nginx/React containers while reusing an existing PostgreSQL container and
+its preserved volume.
+
+1. Inspect your running database with `docker ps` / `docker inspect`. The
+   checked-in rehearsal configuration expects the database to be reachable as
+   `enterprise-rag-postgres` on the external `rag_shared` network. If your
+   setup differs, configure the connection hostname/alias to match reality;
+   do not create a replacement database.
+2. Inspect `docker network inspect rag_shared`. If absent, create it with
+   `docker network create rag_shared`; attach the **verified** database
+   container with `docker network connect rag_shared <database-container>`
+   if not already attached. Recreated database containers need reattachment.
+3. Stop host API processes and all host ingestion workers before starting the
+   container equivalents. Migrate the database separately under the approved
+   procedure; container startup does not run migrations.
+4. Only if absent, copy `deploy/.env.deploy.example` to
+   `deploy/.env.deploy`. Set `RAG_UID` / `RAG_GID` using `id -u` /
+   `id -g`, and `RAG_DEPLOY_DATABASE_URL` with the real database credentials
+   and reachable container hostname, not host loopback. Root `.env` still
+   provides model/provider settings.
+5. Ensure `.original_pdfs`, `.ingestion_spool` and `.model_cache` exist
+   with appropriate ownership; do not loosen existing private permissions.
+   Compose mounts them as `/data/pdfs`, `/data/spool` and
+   `/data/model-cache` and explicitly sets the matching service paths.
+
+Then validate without printing interpolated secrets, build, and start:
+
+```bash
+docker compose --env-file deploy/.env.deploy -f deploy/compose.yaml config --quiet
+docker compose --env-file deploy/.env.deploy -f deploy/compose.yaml build
+docker compose --env-file deploy/.env.deploy -f deploy/compose.yaml up -d
+docker compose --env-file deploy/.env.deploy -f deploy/compose.yaml ps
+python -m scripts.smoke_deployment
+```
+
+Open [the rehearsal UI](http://127.0.0.1:8080). Set `RAG_WEB_PORT` in the
+deployment environment to use another port. Nginx supports SPA deep links,
+proxies `/api`, preserves Host/port and returns private API responses with
+no-store. The supplied stack is loopback HTTP; external HTTPS termination
+requires an explicitly trusted forwarded-scheme configuration.
+
+The smoke script checks the web page, database health and unauthenticated
+document rejection. It does not test tenant isolation, authenticated PDF
+viewing, worker completion, model quality, cookie flows or provider generation.
+
+To stop the rehearsal:
+
+```bash
+docker compose --env-file deploy/.env.deploy -f deploy/compose.yaml down
+```
+
+Do not add volume-removal flags. This stack's database network is external;
+preserve the separate PostgreSQL container, data volume and private bind mounts.
+Restart the host API/worker only after container equivalents have stopped.
+
+## Backups and rollback
+
+Before approved schema/data/model maintenance, stop conflicting API/worker
+activity and take a PostgreSQL backup using a trusted local operator connection,
+for example a custom-format `pg_dump`. Do not put credentials in command-line
+history or print a resolved connection URL.
+
+Back up the corresponding private original-PDF directory and, when preserving
+pending jobs, staged input with a consistent stopped queue. Preserve private
+configuration securely outside Git. Model caches can be downloaded again, but
+keeping the correct weights helps offline startup/rollback. A database backup
+alone does not preserve original files.
+
+Test restores in an isolated database/storage location before relying on the
+backup. Restoring over live data needs separate approval. Verify documents,
+vector-model compatibility, tenant/ACL isolation, PDFs, conversations and queue
+state before resuming.
+
+Migrations are generally additive and can remain during an application rollback;
+review actual constraints/backfills and code compatibility. Do not drop usage,
+budget, conversation or feedback history as a rollback shortcut. Do not revert
+to an older worker that ignores retry scheduling while retries remain pending.
+
+`scripts.reindex_samples --confirm` is a destructive demo maintenance tool,
+not normal ingestion or upgrade: it checks the four demo TXT identities, deletes
+their owned records and recreates them. It can change IDs and cascade references.
+Use only on approved disposable samples with a backup, never a real corpus.
+
+Code rollback should use the matching reviewed Git change without overwriting
+other uncommitted work. Embedding-model rollback additionally requires compatible
+stored vectors; see [Changing embedding models safely](#changing-embedding-models-safely).
+Never reset Docker volumes, bulk-delete reservations, or erase live files to
+resolve an application error.
 
 ## Troubleshooting
 
-- **Connection refused:** Run `docker compose ps` and `docker compose logs postgres`.
-- **Port 5432 already in use:** Change the host port in `docker-compose.yml`
-  and in the `DATABASE_URL` inside `.env`.
-- **pgvector missing:** Run `python -m scripts.init_db` before starting the API.
-- **Model download error:** Check network/proxy access to Hugging Face.
-- **`/ask` returns 503:** Check `LLM_PROVIDER`, its matching key and model ID in `.env`, or use `/search`.
-- **Windows Python command:** Depending on installation, you may need `py -3.12`.
+| Symptom | Checks / action |
+| --- | --- |
+| API says address already in use / errno 48 | Inspect `lsof -nP -iTCP:8000 -sTCP:LISTEN`. Reuse the existing API or stop its owning terminal with Ctrl-C before restarting. Do not kill an unidentified process. A different API port also needs matching frontend proxy configuration. |
+| Frontend port 5173 occupied | Vite uses a strict port; stop/reuse the existing frontend or explicitly configure a matching development origin. |
+| Database unavailable / connection refused | Verify the existing PostgreSQL process/container, host port, network and private DATABASE_URL. Container loopback is not the database container. |
+| Missing table/column or vector extension | Review schema and the migration order; schedule approved maintenance rather than dropping/recreating the database. |
+| F5 returns to sign-in | Password cookie sessions should restore until expiry/revocation; API-key sign-in is deliberately memory-only. Check hostname consistency, cookie blocking, session expiry and same-origin/HTTPS proxy configuration. |
+| 401 / 403 | Check active credentials, current role and tenant. Do not bypass authorization or expose private files. |
+| 429 on ask | Review tenant/user pause/limits, current-month spending and reservations. Missing-cost holds require billing reconciliation. Search can still work. |
+| Ask returns 503 | Check generation provider/key/model settings, network and application error. A possible paid attempt can retain a hold; avoid blind retries. |
+| Upload stays queued | Start the separate worker with the same database/model/spool/PDF paths; inspect safe worker logs and admin ingestion health. |
+| Processing heartbeat is stale | Investigate worker/database availability. Use dry-run recovery, and stop all workers before approved recovery. |
+| PDF over 300 pages fails | Current cap is 1,000 physical pages and 50 MiB. Restart API and worker after updating code; check text extraction, encryption, size and the actual failed-job reason. |
+| Original PDF unavailable | Check current access and stored bytes. Older indexed PDFs can lack originals; authorized replace/reindex can repair them. Do not use a public filesystem bypass. |
+| Chinese search weak or no useful results | Confirm a text layer, model/vector compatibility, multilingual configuration, current chunking and retrieval mode. Evaluate real authorized examples; literal matching is not translation. |
+| Models appear to reload every start | Loading cached weights into RAM/MPS is expected per process. Confirm the local-cache log, stable HF_HOME and same OS user. |
+| Model download/cache error | Check selected model, cache permissions, network/proxy and offline flags. Offline mode requires complete cached files. Do not change embedding models as a cache workaround. |
+| Dashboard shows stale data | Retry the affected section. Ordinary errors preserve marked stale content; authorization failures clear protected data. |
+| Failed-upload removal returns 503 | Staged-file cleanup failed; the job is retained. Repair storage access before retrying; do not delete unrelated spool files. |
 
-## What comes next
+## Current limitations and improvement areas
 
-1. PDF ingestion and document structure; metadata / document versioning.
-2. Retrieval evaluation (Recall@k), hybrid BM25 + vector, reranking.
-3. Authentication, row-level security and document access control.
-4. Observability, rate limiting, async jobs, safe file handling.
-5. HNSW indexing and performance/load testing on realistic corpora.
+Implemented features include authentication/ACLs, PDFs/citations, hybrid search,
+reranking, background processing, accounts/admin, persistent history,
+collections, feedback, usage and budgets. They are not future milestones.
 
-## Official references
+Remaining work includes:
 
-- https://github.com/pgvector/pgvector
-- https://github.com/pgvector/pgvector-python
-- https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2
-- https://fastapi.tiangolo.com/tutorial/first-steps/
-- https://developers.openai.com/api/reference/python/resources/responses/methods/create
+- Production TLS/identity integration, verified email, password reset, MFA/SSO,
+  distributed rate limiting, and richer session/key review.
+- Least-privilege database roles and independent database row-level security;
+  current tenant enforcement is application SQL plus selected tenant constraints.
+- Malware scanning, OCR, document classification/retention, encrypted storage
+  policy, object storage and tested backup/disaster recovery.
+- Representative multilingual/retrieval evaluation, large-corpus query
+  profiling, database indexes as justified by measurements, and load testing.
+- Durable shared telemetry, automated provider-billing reconciliation and
+  generation idempotency.
+- Authorized multi-turn generation context and paginated long chat history.
+- A separately planned public landing page.
+
+Answer citations are references to retrieved excerpts, not machine-verified
+truth. Feedback is sentiment, not accuracy. Account deactivation does not remove
+stored data. No feature should be interpreted as a guarantee of production
+security or a hard provider spending cap.
+
+## Former milestone guides
+
+The former `docs/*.md` files now point to these canonical sections. Their
+historical patch names and install order should not be used as current setup
+instructions.
+
+| Former guide | Current README sections |
+| --- | --- |
+| M7 — Security | [Authentication and authorization](#authentication-and-authorization), [Fresh installation and upgrades](#fresh-installation-and-upgrades) |
+| M8 — React UI | [Using the application](#using-the-application), [Daily startup](#daily-startup) |
+| M9 — Background ingestion | [Document ingestion and PDF storage](#document-ingestion-and-pdf-storage), [Worker operations and recovery](#worker-operations-and-recovery) |
+| M9.2 — Original PDFs | [Original PDFs and citations](#original-pdfs-and-citations) |
+| M9.3 — Worker reliability | [Worker operations and recovery](#worker-operations-and-recovery) |
+| M9.4 — Observability | [Audit log and observability](#audit-log-and-observability) |
+| M10 — Accounts/admin | [Authentication and authorization](#authentication-and-authorization), [Using the application](#using-the-application) |
+| M10 usage | [Usage and credit budgets](#usage-and-credit-budgets) |
+| M10.2 — Budgets | [Monthly credit guardrails](#monthly-credit-guardrails) |
+| M10.3 — Conversations | [Saved conversations](#saved-conversations) |
+| M10.4 — Knowledge bases | [Knowledge bases](#knowledge-bases) |
+| M10.5 — Feedback | [Answer feedback](#answer-feedback) |
+
+`AGENTS.md` remains the contributor/agent instruction file.
+`CODEX_HANDOFF.md` supplies historical context; the checked-out code and tests
+take precedence over older milestone claims.
+
+Project references:
+[pgvector](https://github.com/pgvector/pgvector),
+[pgvector Python](https://github.com/pgvector/pgvector-python),
+[Sentence Transformers](https://www.sbert.net/),
+[FastAPI](https://fastapi.tiangolo.com/),
+[multilingual E5](https://huggingface.co/intfloat/multilingual-e5-small), and
+[the multilingual reranker](https://huggingface.co/cross-encoder/mmarco-mMiniLMv2-L12-H384-v1).

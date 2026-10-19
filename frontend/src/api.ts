@@ -1,5 +1,6 @@
 import type { AskResponse, DocumentRecord, DocumentAccess, DocumentAccessUpdate, Identity, IngestResponse, IngestionJob, EnqueuedJob, AuthToken, AdminUser, AdminInvitation, NewInvitation, AdminDashboard, AdminUsage, AdminBudgets, Role, SavedConversation, SavedConversationDetail, KnowledgeBase, ConversationAskResponse, AnswerFeedback, AdminFeedback } from './types'
 import type { DocumentLibrary, AuditLog } from './types'
+import type { CreditSummary, CreditHistory, CreditOrder, CreditTransaction } from './types'
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -55,6 +56,15 @@ async function publicPost<T>(path: string, body: unknown): Promise<T> {
 }
 
 export const api = {
+  credits: (key: string, signal?: AbortSignal) => request<CreditSummary>(key, '/credits', {signal}),
+  creditOrders: (key: string, page: number, size: number, signal?: AbortSignal) =>
+    request<CreditHistory<CreditOrder>>(key, `/credits/orders?page=${page}&page_size=${size}`, {signal}),
+  creditTransactions: (key: string, page: number, size: number, signal?: AbortSignal) =>
+    request<CreditHistory<CreditTransaction>>(key, `/credits/transactions?page=${page}&page_size=${size}`, {signal}),
+  purchaseCredits: (key: string, credits: string, network: string, request_key: string) =>
+    request<CreditOrder>(key, '/credits/orders', {method: 'POST', body: JSON.stringify({credits, network, request_key})}),
+  checkCreditOrder: (key: string, id: string) =>
+    request<CreditOrder>(key, `/credits/orders/${encodeURIComponent(id)}/check`, {method: 'POST'}),
   browserSession: () => request<Identity>('', '/auth/session'),
   browserLogin: (email: string, password: string) => publicPost<Identity>('/auth/browser/login', {email, password}),
   browserRegister: (invitation_code: string, email: string, username: string, password: string) =>

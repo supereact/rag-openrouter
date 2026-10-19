@@ -44,7 +44,7 @@ def fake_connection(calls):
 def setup(monkeypatch):
     calls = []
     monkeypatch.setattr(services, "db_connection", lambda: fake_connection(calls))
-    monkeypatch.setattr(services, "embed_many", lambda _texts: [[0.1, 0.2, 0.3]])
+    monkeypatch.setattr(services, "embed_many", lambda _texts, **_kwargs: [[0.1, 0.2, 0.3]])
     monkeypatch.setattr(services, "_audit", lambda *args, **kwargs: None)
     return calls
 

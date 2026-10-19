@@ -5,6 +5,23 @@ export interface Identity {
   username: string
   role: Role
 }
+
+export interface CreditSummary {
+  mode: 'disabled' | 'sandbox' | 'live'
+  payments_enabled: boolean; usage_enforced: boolean
+  balance: string; reserved: string; available: string
+  service_fee_percent: string; minimum_credits: string; maximum_credits: string
+  networks: {id: string; label: string}[]
+}
+export interface CreditOrder {
+  id: string; mode: 'sandbox' | 'live'; credits: string; service_fee: string
+  total_usd: string; network: string; status: string; pay_address: string | null
+  pay_amount: string | null; expires_at: string | null; created_at: string
+}
+export interface CreditTransaction {
+  id: number; kind: 'topup' | 'usage' | 'refund'; amount: string; created_at: string
+}
+export interface CreditHistory<T> { items: T[]; total: number; page: number; page_size: number; pages: number }
 export interface DocumentRecord {
   id: number
   title: string

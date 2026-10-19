@@ -1,6 +1,6 @@
 import { useEffect, useState, type MouseEvent } from 'react'
 
-export const routes = ['/assistant', '/documents', '/dashboard', '/users', '/knowledge-bases', '/audit-log'] as const
+export const routes = ['/assistant', '/documents', '/dashboard', '/users', '/knowledge-bases', '/audit-log', '/credits'] as const
 export function returnDestination(value: string | null): string {
   if (!value || !value.startsWith('/') || value.startsWith('//')) return '/assistant'
   const url = new URL(value, window.location.origin)

@@ -7,6 +7,9 @@ from app.chunking import chunk_text
 from app.db import db_connection
 from app.security import Principal
 from app.embeddings import embed_many
+from app.chinese import contains_han, search_terms
+from app.settings import RERANKER_MODEL
+from app.model_loading import load_cached_model
 from app.schemas import SearchHit
 from app.llm import generate_grounded_answer
 from app.retrieval import Candidate, reciprocal_rank_fusion, row_to_candidate, rerank_candidates
@@ -217,17 +220,16 @@ def ingest_pdf_pages(
     return doc_id, len(numbered_parts), False
 
 
-# Exact vector search is retained as the default (existing API behavior).
-# Set RAG_RETRIEVAL_MODE=hybrid or =rerank in .env to opt in.
+# English retains the existing vector default; Han queries add literal matches.
+# Set RAG_RETRIEVAL_MODE=hybrid or =rerank to opt in for other queries.
 RETRIEVAL_MODES = {"vector", "hybrid", "rerank"}
-RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 
 @lru_cache(maxsize=1)
 def _get_reranker():
     # Import and download weights only when reranking is explicitly requested.
     from sentence_transformers import CrossEncoder
-    return CrossEncoder(RERANKER_MODEL)
+    return load_cached_model(CrossEncoder, RERANKER_MODEL)
 
 
 def _cross_encoder_rerank(question: str, candidates: list[Candidate]) -> list[Candidate]:
@@ -253,6 +255,11 @@ def search_documents(
         raise ValueError(f"Unknown retrieval mode: {selected_mode}")
     if not 1 <= top_k <= 10:
         raise ValueError("top_k must be between 1 and 10")
+    han_query = contains_han(question)
+    # Preserve explicit vector-only evaluation; normal Chinese requests also
+    # retrieve lexical candidates instead of relying on the English baseline.
+    if mode is None and selected_mode == 'vector' and han_query:
+        selected_mode = 'hybrid'
 
     # Candidate pool is deliberately larger than the final top_k so that
     # lexical search can rescue vectors ranked outside top 5.
@@ -269,7 +276,7 @@ def search_documents(
                 "WHERE kbd.knowledge_base_id=%s AND kbd.document_id=d.id "
                 "AND kbd.tenant_id=d.tenant_id)") if knowledge_base_id is not None else ""
     kb_args = (knowledge_base_id,) if knowledge_base_id is not None else ()
-    embedding = embed_many([question])[0]
+    embedding = embed_many([question], query=True)[0]
     select_columns = """c.id, d.id, d.title, c.chunk_index, c.content,
                         c.page_number, 1 - (c.embedding <=> %s) AS similarity"""
 
@@ -287,6 +294,19 @@ def search_documents(
         vector_candidates = [row_to_candidate(row) for row in vector_rows]
         if selected_mode == "vector":
             ordered = vector_candidates
+        elif han_query:
+            keyword_rows = conn.execute(
+                f'''SELECT {select_columns}
+                    FROM chunks c JOIN documents d ON d.id=c.document_id
+                    CROSS JOIN LATERAL (
+                        SELECT count(*) AS matches FROM unnest(%s::text[]) AS terms(term)
+                        WHERE strpos(lower(c.content), terms.term) > 0
+                    ) lexical
+                    WHERE {ACCESS_SQL}{kb_where} AND lexical.matches > 0
+                    ORDER BY lexical.matches DESC,c.id LIMIT %s''',
+                (embedding, search_terms(question), *access_args(principal), *kb_args, pool_size),
+            ).fetchall()
+            ordered = reciprocal_rank_fusion(vector_candidates, [row_to_candidate(row) for row in keyword_rows])
         else:
             # websearch_to_tsquery handles ordinary phrases and punctuation
             # without requiring the caller to write tsquery syntax.
@@ -329,6 +349,9 @@ def search_documents(
 
 def answer_question(question: str, sources: list[SearchHit]) -> str:
     if not sources:
+        if contains_han(question):
+            # These characters are shared by Simplified and Traditional Chinese.
+            return '未找到可引用的已索引文本。'
         return "No indexed sources are available to answer that question."
 
     context = "\n\n".join(

@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from app.db import db_connection
 from app.security import Principal
 from app.usage_ledger import _nonnegative_int, _reported_cost
+from app import credit_wallets
 
 DEFAULT_RESERVE = Decimal('0.01')
 MAX_CREDITS = Decimal('1000000')
@@ -83,17 +84,19 @@ def _totals(conn, principal: Principal, start: datetime) -> tuple[Decimal, Decim
 def reserve_request(principal: Principal) -> UUID | None:
     """Atomically reserve allowance BEFORE contacting OpenRouter.
 
-    Returns None if no active policy exists, preserving the original usage
-    ledger path. Storage failure fails closed rather than bypassing budgets.
+    Returns None if no active policy or prepaid enforcement exists, preserving
+    the original usage path. Wallet and monthly holds share this transaction.
+    Storage failure fails closed rather than bypassing budgets.
     """
     with db_connection() as conn:
         _lock_tenant(conn, principal.tenant_id)
+        prepaid = credit_wallets.enforcement_enabled()
         tenant, user = _budget_rows(conn, principal)
         if tenant and tenant[1] or user and user[1]:
             raise HTTPException(status_code=429, detail='OpenRouter generation paused by administrator')
         limit_t = Decimal(str(tenant[0])) if tenant and tenant[0] is not None else None
         limit_u = Decimal(str(user[0])) if user and user[0] is not None else None
-        if limit_t is None and limit_u is None:
+        if limit_t is None and limit_u is None and not prepaid:
             return None
         reserve = Decimal(str(tenant[2])) if tenant else DEFAULT_RESERVE
         spent_t, spent_u, held_t, held_u = _totals(conn, principal, month_start_utc())
@@ -105,12 +108,16 @@ def reserve_request(principal: Principal) -> UUID | None:
             (id, tenant_id, user_id, reserved_credits, status)
             VALUES (%s,%s,%s,%s,'reserved')''',
             (rid, principal.tenant_id, principal.user_id, reserve))
+        if prepaid:
+            credit_wallets.reserve(conn, principal, rid, reserve)
         return rid
 
 
 def release_before_generation(reservation_id: UUID, principal: Principal) -> None:
     """Release the hold only when the LLM was definitely not called."""
     with db_connection() as conn:
+        _lock_tenant(conn, principal.tenant_id)
+        credit_wallets.finalize(conn, principal, reservation_id, release=True)
         conn.execute("""UPDATE credit_reservations SET status='released', finalized_at=now()
             WHERE id=%s AND tenant_id=%s AND user_id=%s AND status='reserved'""",
             (reservation_id, principal.tenant_id, principal.user_id))
@@ -127,6 +134,7 @@ def settle_request(reservation_id: UUID, principal: Principal, model: str,
     prompt = _nonnegative_int(usage.get('prompt_tokens')) if usage else None
     completion = _nonnegative_int(usage.get('completion_tokens')) if usage else None
     with db_connection() as conn:
+        _lock_tenant(conn, principal.tenant_id)
         row = conn.execute('''SELECT status FROM credit_reservations
             WHERE id=%s AND tenant_id=%s AND user_id=%s FOR UPDATE''',
             (reservation_id, principal.tenant_id, principal.user_id)).fetchone()
@@ -134,6 +142,7 @@ def settle_request(reservation_id: UUID, principal: Principal, model: str,
             raise RuntimeError('Reservation not found for user')
         if row[0] != 'reserved':
             return row[0]
+        credit_wallets.finalize(conn, principal, reservation_id, cost=cost)
         if usage and (prompt is not None or completion is not None or cost is not None):
             conn.execute('''INSERT INTO openrouter_usage_events
                 (id,tenant_id,user_id,model,prompt_tokens,completion_tokens,cost_credits)

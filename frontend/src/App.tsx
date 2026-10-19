@@ -3,7 +3,7 @@ import {
   ArrowRight, BookOpen, ChevronDown, ChevronRight, Copy,
   FolderOpen, KeyRound, Layers, LogOut, LockKeyhole,
   Menu, MessageSquareText, Send, ShieldCheck, Trash2,
-  LayoutDashboard, UserCog, Plus, Pencil, ThumbsUp, ThumbsDown,
+  LayoutDashboard, UserCog, Plus, Pencil, ThumbsUp, ThumbsDown, Wallet,
 } from 'lucide-react'
 import { ApiError, api } from './api'
 import type { ChatEntry, Identity, SearchHit, SavedConversation, KnowledgeBase, AnswerFeedback, FeedbackReason } from './types'
@@ -13,6 +13,7 @@ import { DashboardPanel, UserManagementPanel } from './AdminPanel'
 import KnowledgeBasesPanel from './KnowledgeBasesPanel'
 import DocumentsPanel from './DocumentsPanel'
 import AuditLogPanel from './AuditLogPanel'
+import CreditsPanel from './CreditsPanel'
 import PageFrame from './PageFrame'
 import { followLink, navigate, returnDestination, routes, useLocation } from './navigation'
 
@@ -499,7 +500,7 @@ export default function App() {
     {navOpen && <button type="button" aria-label="Close navigation" onClick={() => setNavOpen(false)} className="fixed inset-0 z-20 bg-slate-950/40 md:hidden"/>}
     <aside className={`sidebar ${navOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0`}>
       <div className="p-6"><Brand/></div>
-      <nav className="mt-4 px-3 space-y-1" aria-label="Main navigation">
+      <nav className="mt-4 px-3 space-y-1 flex-1 min-h-0 overflow-y-auto" aria-label="Main navigation">
         {([
           ...(session.identity.role === 'admin' ? [
             { key: 'dashboard' as const, title: 'Dashboard', icon: LayoutDashboard },
@@ -509,6 +510,7 @@ export default function App() {
           { key: 'assistant' as const, title: 'Assistant', icon: MessageSquareText },
           { key: 'documents' as const, title: 'Documents', icon: FolderOpen },
           { key: 'knowledge-bases' as const, title: 'Knowledge Bases', icon: BookOpen },
+          { key: 'credits' as const, title: 'Credits', icon: Wallet },
         ]).map(item => {
           const Icon = item.icon
           return <a key={item.key} href={`/${item.key}`} onClick={event => {
@@ -535,6 +537,8 @@ export default function App() {
       </div>
       {path === '/documents' && <DocumentsPanel session={session} onUnauthorized={onUnauthorized}/>}
       {path === '/knowledge-bases' && <KnowledgeBasesPanel session={session} onUnauthorized={onUnauthorized}/> }
+      {path === '/credits' && <CreditsPanel key={`${session.identity.tenant_id}:${session.identity.user_id}:${session.key}`}
+        apiKey={session.key} onUnauthorized={onUnauthorized}/>}
       {path === '/dashboard' && session.identity.role === 'admin' && <DashboardPanel apiKey={session.key} onUnauthorized={onUnauthorized}/>}
       {path === '/users' && session.identity.role === 'admin' && <UserManagementPanel apiKey={session.key} onUnauthorized={onUnauthorized} selfUserId={session.identity.user_id}/>}
       {path === '/audit-log' && session.identity.role === 'admin' && <AuditLogPanel apiKey={session.key} onUnauthorized={onUnauthorized}/>}

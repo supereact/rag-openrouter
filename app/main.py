@@ -18,6 +18,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from app.db import db_connection
 from app import browser_auth
 from app import audit_log
+from app import credit_wallets
+from app.credits_api import router as credits_router
 from app.ingestion_jobs import queue_upload, list_jobs, get_job, job_health, remove_failed_job
 from app.document_library import list_library
 from app.model_warmup import warmup_local_models
@@ -56,6 +58,7 @@ app = FastAPI(
 
 
 _http_logger = logging.getLogger("rag.http")
+app.include_router(credits_router)
 
 
 @app.middleware("http")
@@ -113,6 +116,8 @@ def ask(body: SearchRequest, principal: Principal = Depends(require_principal)):
 
 
 def _run_ask(body: SearchRequest, principal: Principal) -> AskResponse:
+    # Fail closed if prepaid enforcement is configured with an unsupported provider/mode.
+    credit_wallets.enforcement_enabled()
     if body.knowledge_base_id is not None:
         # Prevent spending any budget on a non-existent or foreign collection.
         knowledge_bases.assert_tenant_collection(principal, body.knowledge_base_id)

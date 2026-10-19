@@ -4,6 +4,28 @@ import { ApiError, api } from './api'
 afterEach(() => vi.unstubAllGlobals())
 
 describe('browser API client', () => {
+  it('uses private credits endpoints, CSRF and a stable checkout key', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response('{}', {status: 200}))
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+    await api.credits('', controller.signal)
+    await api.creditOrders('', 2, 50, controller.signal)
+    await api.creditTransactions('', 1, 20, controller.signal)
+    await api.purchaseCredits('', '10.00', 'usdttrc20', 'synthetic-request-id')
+    await api.checkCreditOrder('', 'synthetic-order-id')
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      '/api/credits', '/api/credits/orders?page=2&page_size=50',
+      '/api/credits/transactions?page=1&page_size=20', '/api/credits/orders',
+      '/api/credits/orders/synthetic-order-id/check',
+    ])
+    expect(JSON.parse(fetchMock.mock.calls[3][1].body)).toEqual({credits:'10.00',network:'usdttrc20',request_key:'synthetic-request-id'})
+    for (const [, options] of fetchMock.mock.calls) {
+      expect(options.headers.get('X-RAG-CSRF')).toBe('1')
+      expect(options.headers.has('Authorization')).toBe(false)
+      expect(options.credentials).toBe('same-origin')
+      expect(options.cache).toBe('no-store')
+    }
+  })
   it('requests audit history with filters, bearer auth and cancellation',async () => {
     const fetchMock=vi.fn().mockResolvedValue(new Response('{}',{status:200}))
     vi.stubGlobal('fetch',fetchMock)
