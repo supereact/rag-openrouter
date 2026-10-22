@@ -23,7 +23,7 @@ const faqs = [
   ['Can I check where an answer came from?', 'Yes. Retrieved sources accompany answers. Page-aware PDF citations let authorized users open the original PDF at the cited physical page. Page numbers follow file order and may differ from printed page labels.'],
   ['Who can see my documents?', 'Access is controlled by your tenant, account role, document ownership and sharing permissions. Putting a document in a knowledge base does not grant access to it. Administrators manage users and permissions within their tenant.'],
   ['Where is document data processed?', 'Embeddings are generated locally. Relevant document excerpts and question context are sent to the configured generation provider, such as OpenRouter, to produce answers. Storage, model selection and provider settings depend on your deployment.'],
-  ['How do I get started?', 'Ask your workspace administrator for an invitation code. Choose Get started to create your account with that code, or Sign in if you already have an account. An API-key sign-in option is also available.'],
+  ['How do I get started?', 'Choose Get started to create an account and a private workspace. To join an existing team, enter the invitation code supplied by its administrator. Choose Sign in if you already have an account. An API-key sign-in option is also available.'],
 ]
 
 function WorkspaceLink({ signedIn, large = false }: { signedIn: boolean; large?: boolean }) {
@@ -137,7 +137,7 @@ function PrecisionLanding({ signedIn }: { signedIn: boolean }) {
         <Accordion type="single" collapsible className="min-w-0">{faqs.map(([question, answer], index) => <AccordionItem key={question} value={`faq-${index}`}><AccordionTrigger>{question}</AccordionTrigger><AccordionContent>{answer}</AccordionContent></AccordionItem>)}</Accordion>
       </section>
 
-      <section className="landing-container landing-final-cta" aria-labelledby="cta-title"><div className="landing-cta-glow" aria-hidden="true"/><Layers size={31} className="relative mx-auto text-violet-300" aria-hidden="true"/><h2 id="cta-title">Your next great answer<br/>is already in your documents.</h2><p>Bring your team closer to what they know.</p><WorkspaceLink signedIn={signedIn} large/><span className="mt-4 block text-xs text-slate-500">{signedIn ? 'Continue in your authorized workspace.' : 'Have an invitation? Your workspace is one step away.'}</span></section>
+      <section className="landing-container landing-final-cta" aria-labelledby="cta-title"><div className="landing-cta-glow" aria-hidden="true"/><Layers size={31} className="relative mx-auto text-violet-300" aria-hidden="true"/><h2 id="cta-title">Your next great answer<br/>is already in your documents.</h2><p>Bring your team closer to what they know.</p><WorkspaceLink signedIn={signedIn} large/><span className="mt-4 block text-xs text-slate-500">{signedIn ? 'Continue in your authorized workspace.' : 'Create your private workspace. No invitation required.'}</span></section>
     </main>
 
     <footer className="landing-footer landing-container"><div><a href="#landing-main" aria-label="KnowledgeBase home"><Brand/></a><p>Built for knowledge. Grounded in sources.</p></div><nav aria-label="Footer navigation"><a href="#product">Product</a><a href="#security">Security</a><a href="#faq">FAQ</a><a href={signedIn ? '/assistant' : '/login'} onClick={followLink}>{signedIn ? 'Workspace' : 'Sign in'}</a></nav><span>© {new Date().getFullYear()} KnowledgeBase</span></footer>

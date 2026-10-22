@@ -59,6 +59,8 @@ class Store:
             return Cursor()
         if q.startswith('select monthly_limit_credits'):
             return Cursor(None)
+        if 'from user_starter_allowances' in q:
+            return Cursor(None)  # Existing prepaid customers have no signup limit.
         if q.startswith('select coalesce((select sum(cost_credits)'):
             return Cursor((Decimal(0),)*4)  # No monthly policies in wallet integration cases.
         if q.startswith('insert into credit_reservations'):

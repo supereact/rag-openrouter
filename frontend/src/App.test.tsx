@@ -135,10 +135,12 @@ it('opens a direct Account URL for an ordinary user and signs out after a passwo
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
+  vi.unstubAllEnvs()
 })
 
 describe('browser session restoration', () => {
   it('lets a reader return to Credits after sign-in and navigate Back', async () => {
+    vi.stubEnv('VITE_CREDITS_ENABLED', 'true')
     window.history.replaceState({}, '', '/credits')
     render(<App/>)
     await login()
@@ -153,6 +155,26 @@ describe('browser session restoration', () => {
     })
     await screen.findByRole('heading', {name: 'Credits'})
     expect(api.credits).toHaveBeenCalledWith('rag_dummy_key', expect.any(AbortSignal))
+  })
+  it.each(['reader', 'admin'] as const)('disables Credits navigation and direct access for %s', async role => {
+    vi.stubEnv('VITE_CREDITS_ENABLED', 'false')
+    vi.mocked(api.browserSession).mockResolvedValue({...account, role})
+    window.history.replaceState({}, '', '/credits')
+    render(<App/>)
+    await screen.findByRole('heading', {name: 'Credits unavailable'})
+    expect(screen.queryByRole('link', {name: 'Credits'})).not.toBeInTheDocument()
+    expect(api.credits).not.toHaveBeenCalled()
+    expect(api.creditOrders).not.toHaveBeenCalled()
+    expect(api.purchaseCredits).not.toHaveBeenCalled()
+  })
+  it('ignores a disabled Credits return destination after sign-in', async () => {
+    vi.stubEnv('VITE_CREDITS_ENABLED', 'false')
+    window.history.replaceState({}, '', '/login?returnTo=%2Fcredits')
+    render(<App/>)
+    await login()
+    await screen.findByRole('heading', {name: 'Knowledge Assistant'})
+    expect(window.location.pathname).toBe('/assistant')
+    expect(api.credits).not.toHaveBeenCalled()
   })
   it('restores password sign-in after a full app remount and preserves the current URL', async () => {
     const view = render(<App/>)
@@ -459,6 +481,22 @@ describe('Milestone 8 UI', () => {
     expect(api.browserRegister).toHaveBeenCalledWith(
       'invite_abcdefghijklmnopqrstuvwxyz123456789','newuser@example.org','newuser','test-only-password-123',
     )
+  })
+
+  it('creates a private workspace without an invitation or storing session secrets', async () => {
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', {name:'Sign up'}))
+    expect(screen.getByLabelText('Invitation code')).not.toBeRequired()
+    expect(screen.getByText(/one-time \$0.001 OpenRouter usage allowance/)).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Username'), {target:{value:'newuser'}})
+    fireEvent.change(screen.getByLabelText('Email address'), {target:{value:'newuser@example.org'}})
+    fireEvent.change(screen.getByLabelText('Password'), {target:{value:'test-only-password-123'}})
+    fireEvent.change(screen.getByLabelText('Confirm password'), {target:{value:'test-only-password-123'}})
+    fireEvent.click(screen.getByRole('button', {name:'Create account'}))
+    await screen.findByRole('heading', {name:'Knowledge Assistant'})
+    expect(api.browserRegister).toHaveBeenCalledWith('', 'newuser@example.org', 'newuser', 'test-only-password-123')
+    expect(storage.setItem).not.toHaveBeenCalled()
+    expect(screen.queryByRole('link', {name:'Dashboard'})).not.toBeInTheDocument()
   })
 
   it('shows admin navigation and dashboard only for admins', async () => {

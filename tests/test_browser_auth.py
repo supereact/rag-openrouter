@@ -40,6 +40,7 @@ def state(monkeypatch):
     monkeypatch.setattr(security, 'db_connection', connect)
     monkeypatch.setattr(main, 'warmup_local_models', lambda: None)
     monkeypatch.setattr(main.app, 'dependency_overrides', {})
+    monkeypatch.setattr(account_auth, 'registration_throttle', account_auth.LoginThrottle())
     monkeypatch.setattr(account_auth, 'login', Mock(return_value={
         'access_token': TOKEN, 'token_type': 'bearer', 'expires_in': 43200}))
     monkeypatch.setattr(account_auth, 'register', Mock(return_value={

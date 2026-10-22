@@ -32,4 +32,5 @@ frontend/.env*
 
 # Milestone 9.5 deployment rehearsal
 deploy/.env.deploy
+deploy/.env.production
 .model_cache/

@@ -37,6 +37,7 @@ class FakeConn:
         if 'SELECT pg_advisory_xact_lock' in sql: return Cursor()
         if 'FROM tenant_credit_budgets WHERE tenant_id=' in sql: return Cursor(self.tenant)
         if 'FROM user_credit_budgets WHERE tenant_id=' in sql: return Cursor(self.user)
+        if 'FROM user_starter_allowances' in sql: return Cursor()
         if 'SELECT\n          COALESCE' in sql: return Cursor(self.totals)
         if 'INSERT INTO credit_reservations' in sql:
             self.reservations[args[0]] = 'reserved'

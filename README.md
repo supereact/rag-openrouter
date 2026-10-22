@@ -11,9 +11,8 @@ conversations, accounts, usage, budgets, and feedback.
 
 This README consolidates the former `docs/*.md` milestone guides and describes
 the checked-out implementation. Historical patch instructions are superseded:
-use the current files and migration scripts. This remains a local development
-application with production-hardening gaps; authentication and document ACLs
-are implemented, but they do not constitute a production security assessment.
+use the current files and migration scripts. A single-server production release
+configuration is provided below; it has not been deployed or security-assessed.
 
 ## Contents
 
@@ -36,6 +35,7 @@ are implemented, but they do not constitute a production security assessment.
 - [Worker operations and recovery](#worker-operations-and-recovery)
 - [Testing and evaluation](#testing-and-evaluation)
 - [Optional Docker deployment rehearsal](#optional-docker-deployment-rehearsal)
+- [Production release](#production-release)
 - [Backups and rollback](#backups-and-rollback)
 - [Troubleshooting](#troubleshooting)
 - [Current limitations and improvement areas](#current-limitations-and-improvement-areas)
@@ -185,6 +185,7 @@ python -m scripts.migrate_accounts
 python -m scripts.migrate_ingestion_jobs
 python -m scripts.migrate_usage_ledger
 python -m scripts.migrate_credit_budgets
+python -m scripts.migrate_starter_allowances
 python -m scripts.migrate_credits
 python -m scripts.migrate_conversations
 python -m scripts.migrate_knowledge_bases
@@ -200,6 +201,7 @@ python -m scripts.migrate_support
 | `migrate_ingestion_jobs` | Upload jobs, attempts, retry availability, heartbeats and queue indexes; older rows receive default attempt/availability values. |
 | `migrate_usage_ledger` | Persistent OpenRouter usage events with nullable provider costs. |
 | `migrate_credit_budgets` | Tenant/user monthly policies and request reservations. |
+| `migrate_starter_allowances` | One-time signup allowance policies. Creates an empty table; existing users, usage and reservations are unchanged. Required before starting this release. |
 | `migrate_credits` | Empty individual wallets, USDT orders, credit ledger, holds and callback receipts; sandbox/live balances are separate. No existing account is funded or historical usage changed. |
 | `migrate_conversations` | Private conversations and saved message/source snapshots. |
 | `migrate_knowledge_bases` | Collections and memberships, with composite foreign keys enforcing tenant consistency. |
@@ -312,11 +314,11 @@ state.
 
 | Route | Purpose |
 | --- | --- |
-| `/login` | Password sign-in, invitation registration, or API-key connection. |
+| `/login` | Password sign-in, public/private-workspace registration, invitation registration, or API-key connection. |
 | `/assistant` | Ask questions, inspect numbered citations, view PDFs, manage saved conversations, choose collection scope and rate answers. |
 | `/documents` | Searchable library of indexed documents and queued, processing, or failed uploads; upload files and manage permitted documents. |
 | `/knowledge-bases` | Browse/manage collections of existing authorized documents. |
-| `/credits` | Personal balance, USDT top-ups, payment status and credit history; available to every signed-in role. |
+| `/credits` | Currently disabled: hidden from navigation, direct links show an unavailable message, no payment reads are started. |
 | `/support` | Private user support chats; explicitly designated staff receive a central inbox across tenants. |
 | `/account` | Change your password, review your active password sessions, and revoke individual or other sessions. Available to every signed-in role. |
 | `/dashboard` | Admin overview, OpenRouter usage, monthly budgets, and feedback analytics. |
@@ -373,11 +375,36 @@ invalidate password sessions. Session revocation is distinct from API-key
 revocation; deactivation blocks both authentication forms.
 
 Passwords use salted PBKDF2-HMAC-SHA256 with 600,000 iterations. New passwords
-must contain 12–128 characters and at most 512 UTF-8 bytes. Registration is
-invitation-only: an admin creates a reader/editor invitation bound to an email;
-it expires after 48 hours and can be used once. Codes are shown once and must
+must contain 12–128 characters and at most 512 UTF-8 bytes. Public registration
+without an invitation creates a new, isolated tenant with an **editor** account,
+which can upload/search its documents but has no administrator privileges.
+Clients cannot choose the tenant or role. Set `RAG_PUBLIC_REGISTRATION_ENABLED=false`
+to disable this path; invitations still work. A supplied invalid invitation
+never falls back to public signup. An admin can create a reader/editor invitation
+bound to an email; it expires after 48 hours and can be used once. Codes are shown once and must
 be delivered securely by the administrator; no email delivery service is built
 in. Initial admin setup uses the operator CLI.
+
+Every account registered after the starter-allowance migration receives a
+**one-time $0.001 OpenRouter provider-cost allowance**, including invited accounts.
+It is stored atomically with account creation and never renewed on sign-in or
+month rollover. Existing users retain their current policies. All-time reported
+usage and active/unknown reservations consume this allowance. New requests hold
+up to the remaining allowance, allowing a trial smaller than the usual $0.01
+reservation. Retrieval failures and empty-source answers release unused holds;
+unknown provider costs retain them. Tenant/user monthly limits still apply.
+This is a soft application guardrail: actual provider cost can exceed the hold,
+after which further generation is blocked. It does not deposit money into
+OpenRouter or guarantee a fixed number of answers. Use a separately capped
+production provider key to bound total operator exposure. With purchases disabled,
+an exhausted user must contact the operator; there is no automatic refill.
+
+Document counts are **unlimited**, as requested. Existing 50 MiB/file,
+PDF-page/type validation, writer roles and document permissions remain in force.
+Signup attempts (successful or failed) share an atomic, per-process IP throttle
+across both registration transports: eight attempts per 15 minutes. Production
+also applies shared Nginx IP limits. Email verification, password recovery and
+CAPTCHA are not implemented; public signup does not prove ownership of an email.
 
 Cookie requests use `X-RAG-CSRF: 1`; cookie-authenticated writes and browser
 session endpoints enforce the applicable same-origin checks. No credentialed
@@ -704,6 +731,13 @@ clear tenant/user limits and unpause policies; preserve the accounting history.
 
 ## Personal credits and USDT payments
 
+**Disabled for the current release.** `VITE_CREDITS_ENABLED` defaults to false.
+Only the literal `true` enables the page at frontend build time; rebuild after
+changing it. Production also pins `RAG_PAYMENTS_MODE=disabled` and
+`RAG_WALLET_ENFORCEMENT=false`, so a hidden page is not the purchase safeguard.
+Existing payment data/code is retained. These payment instructions describe
+the separately enabled feature, not the current production rollout.
+
 Every user has an individual tenant-scoped wallet. Monthly admin budgets remain
 separate controls; purchasing credit does not raise or unpause them. Credit cards
 are not implemented. Payments and prepaid enforcement are disabled by default.
@@ -998,7 +1032,7 @@ above. Do not put credentials in URLs.
 | `GET /support/chats/{id}/messages` | Owner or designated staff; after_id cursor, at most 100 messages and has_more. |
 | `POST /support/chats/{id}/messages` | Owner or designated staff sends body/request_key; closed chats reject new replies. |
 | `PATCH /support/chats/{id}` | Designated central staff only; status open/closed, locked and rechecked. |
-| `POST /auth/login`, `POST /auth/register` | Bearer-session login or invitation registration. Login: email/password; registration also needs username/invitation_code. |
+| `POST /auth/login`, `POST /auth/register` | Bearer-session login or registration. Login: email/password; registration also needs username, with optional invitation_code. Without a code, creates an isolated editor workspace. |
 | `POST /auth/logout` | Revoke the supplied session. |
 | `POST /auth/browser/login`, `POST /auth/browser/register` | Same account flows with HttpOnly cookie, no session secret in response JSON. |
 | `GET /auth/session`, `POST /auth/browser/logout` | Restore/revoke browser session with browser request checks. |
@@ -1252,6 +1286,217 @@ Do not add volume-removal flags. This stack's database network is external;
 preserve the separate PostgreSQL container, data volume and private bind mounts.
 Restart the host API/worker only after container equivalents have stopped.
 
+## Production release
+
+### Selected hosting and topology
+
+Use **DigitalOcean, Singapore (SGP1)**, with an Ubuntu 24.04 LTS x86-64 Droplet:
+start with **4 vCPU, 8 GiB RAM, 160 GiB SSD** for a low-traffic launch. The listed
+Basic Regular plan is **US$48/month** as checked October 22, 2026; backups,
+domain, taxes and OpenRouter usage are additional. Confirm the regional plan
+and checkout price before provisioning. This is a sizing starting point, not
+a measured throughput guarantee. API and worker each load models; monitor RAM
+and move to 16 GiB if the selected multilingual models/corpus require it.
+See [Droplet pricing](https://www.digitalocean.com/pricing/droplets) and
+[regional availability](https://docs.digitalocean.com/platform/regional-availability/).
+
+`deploy/production.compose.yaml` is separate from the Mac rehearsal and root
+database Compose files. **Run it only on the new remote host.** It runs:
+
+- Caddy on public TCP 80/443, with automatic HTTPS and persistent certificate state.
+- Nginx serving the existing React/Vite build and proxying `/api`; Credits is disabled.
+- One FastAPI process and one ingestion worker, both running as UID/GID 10001.
+- PostgreSQL 17/pgvector on a private Docker network, with a named data volume.
+- Separate database owner/migration credentials and a restricted `rag_app` runtime role.
+
+Only Caddy publishes ports. Nginx trusts forwarding headers only from Caddy;
+Uvicorn trusts only Nginx's fixed private IP, preserving HTTPS cookie and Origin
+checks. Networks use `172.30.72.0/24` and `172.30.73.0/24`; check for conflicts
+before launch. If changing them, update Compose, Nginx trust addresses and
+Uvicorn's allowlist together. Do not put another CDN/proxy in front without
+reviewing its trusted-proxy configuration.
+
+Nginx limits auth requests to 5/minute/IP with burst 5, and API traffic to
+120/minute/IP with burst 30. It returns 429 on excess; shared-office users can
+share this allowance. Registration additionally counts eight attempts/15 minutes
+in the API. All application request access logs are disabled at the proxies;
+container log rotation is configured. TLS behavior follows
+[Caddy's HTTPS documentation](https://caddyserver.com/docs/automatic-https), and
+forwarded identities follow [Caddy's proxy rules](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy)
+and [Uvicorn's trusted-proxy settings](https://uvicorn.dev/settings/).
+
+This is one server, not a highly available deployment. The current frontend is
+still Vite; the interrupted Next.js migration is not part of this release.
+
+### Remote preparation
+
+1. Provision the Droplet using an SSH key. Configure a DigitalOcean Cloud Firewall:
+   allow TCP 22 only from your administration IP and TCP 80/443 publicly. Do not
+   open PostgreSQL, FastAPI or rehearsal ports. Install Docker Engine and its
+   Compose plugin using the [official Ubuntu instructions](https://docs.docker.com/engine/install/ubuntu/).
+2. Point an `A` record for your chosen hostname to the Droplet. Add `AAAA` only
+   if IPv6 is configured. Use direct DNS initially. Caddy needs public DNS and
+   access to ports 80/443 for certificates. No domain/server has been provisioned
+   by the code changes.
+3. Check out the reviewed release on the remote server. Keep a matching Git
+   commit and built image tags for rollback. Create persistent private directories:
+
+   ```bash
+   sudo install -d -m 700 -o 10001 -g 10001 /srv/rag-data/spool /srv/rag-data/pdfs /srv/rag-data/model-cache
+   cp deploy/.env.production.example deploy/.env.production
+   chmod 600 deploy/.env.production
+   ```
+
+4. Edit that **remote, ignored** environment file privately. Set the hostname,
+   ACME email, release tag, independent owner/runtime DB passwords and their
+   URL-encoded connection URLs, and a dedicated OpenRouter key with an operator
+   spending limit. Copy the actual embedding/reranker configuration used for
+   existing vectors. Never change embedding models merely to deploy.
+   Configure support staff IDs only after checking the imported user identities.
+   Root/local `.env` is neither uploaded nor changed by this configuration.
+5. Define a local shell helper **on the remote host** and validate/build:
+
+   ```bash
+   rag_compose() { docker compose --env-file deploy/.env.production -f deploy/production.compose.yaml "$@"; }
+   rag_compose config --quiet
+   rag_compose build
+   rag_compose up -d postgres
+   ```
+
+   Do not omit `--quiet` when validating configuration: rendered Compose output
+   contains secrets. Builds need network access for dependencies and CPU model
+   libraries. Initial model downloads occur when API/worker start and persist in
+   `/srv/rag-data/model-cache`. Record the resolved image digests/dependency versions
+   and scan the built images before opening traffic; base tags and Python version
+   ranges currently resolve at build time, not from a Python lockfile.
+
+### Database and private-file cutover — requires approved maintenance
+
+Do not run these operations against the Mac's existing database or overwrite a
+remote database containing data. Back up the existing database **and private PDF
+directory** first. Pause uploads/writes, let processing finish, and stop existing
+API/workers during the consistent snapshot/cutover. Keep the Mac stack and its
+volume as rollback sources.
+
+For an existing installation, restore the reviewed PostgreSQL custom-format dump
+into the **fresh remote** database as `rag_owner`, with `pg_restore --no-owner
+--no-privileges --exit-on-error`. Review any schema/extension conflict rather
+than adding destructive cleanup flags. Copy private PDFs and pending spool files
+to their corresponding `/srv/rag-data/` directories over an encrypted channel;
+preserve UUID/document filenames and set ownership 10001:10001, directories
+0700 and private files 0600. Do not make uploads web-accessible. Inspect recovered
+processing jobs using the existing dry-run recovery workflow; do not blindly
+requeue claims or run both the Mac and production worker on one database.
+
+For a deliberately **empty** installation only, run the existing migrations in
+the fresh-install order above, using the maintenance image with owner credentials:
+
+```bash
+# Example invocation for each module in the documented fresh-install sequence:
+rag_compose --profile maintenance run --rm -T migrate python -m scripts.init_db
+# Continue with migrate_security, migrate_accounts, and the remaining modules.
+```
+
+For an imported, already migrated database, the only new migration is:
+
+```bash
+rag_compose --profile maintenance run --rm -T migrate
+```
+
+This creates `user_starter_allowances` without backfilling or funding existing
+accounts. Run it **before starting this release**: missing accounting storage
+fails closed. It has been prepared, not applied by this change. The database
+initialization script installs pgvector, a non-owner runtime role and default
+grants for tables/sequences created by `rag_owner`. After restoring, confirm
+runtime grants before traffic; foreign ownership/ACLs from an old dump must not
+be carried into the new runtime role. Existing default-privilege setups are not
+retroactively changed by mounting the initialization script on an existing volume.
+
+### Verification and opening traffic
+
+```bash
+rag_compose run --rm -T api python -m scripts.check_production
+rag_compose up -d api worker web caddy
+rag_compose ps
+python3 -m scripts.smoke_deployment --url https://YOUR_HOSTNAME
+```
+
+The preflight performs read-only schema/role/storage/configuration checks and
+never prints credentials. Production API/worker startup runs it automatically
+and refuses to start on failure. It does not download models or verify provider billing.
+Allow model warmup to finish and inspect sanitized service logs. Validate with
+approved disposable accounts/documents: public signup without a code, invited
+signup, F5 cookie restoration, another tenant's access denial, multiple PDF/TXT/MD
+uploads through the worker, a citation PDF, support, and Credits unavailability.
+Verify the starter allowance against reported usage and unknown-cost holds; no
+live paid calls are made by automated tests. Public signup has no email proof,
+password-recovery delivery or CAPTCHA, and unlimited uploads require disk/queue
+monitoring. Resolve those operational limits before widening access.
+
+### Backups, monitoring and rollback
+
+Enable host backups and schedule encrypted **off-server** copies of PostgreSQL
+dumps plus private PDFs and necessary spool files; a disk snapshot alone does
+not establish a consistent application restore. Restrict backups to operators,
+define retention and test recovery on a separate disposable server before launch.
+After draining processing and pausing writes, an operator can take a backup:
+
+```bash
+umask 077
+archive_dir=/secure-backups/RELEASE_TIMESTAMP
+mkdir -p "$archive_dir"
+rag_compose exec -T postgres pg_dump -U rag_owner -d ragdb --format=custom --no-owner --no-privileges > "$archive_dir/database.dump"
+sudo tar -C /srv/rag-data -czf "$archive_dir/private-files.tgz" pdfs spool
+```
+
+Encrypt and transfer these archives to separate storage; verify restore, then
+resume writes. Monitor disk, RAM, CPU, TLS expiry, health, failed/stale ingestion,
+provider spend and unknown-cost reservations. Configure external uptime checks
+and real alert recipients before launch. No backup schedule or alerts are created
+by this patch.
+
+Rollback uses the prior matching API/worker/web image tags after pausing writes.
+Keep the additive allowance table; never drop ledgers or reset volumes. Before
+rolling back to a version that lacks starter enforcement, turn off public
+registration and generation at the gateway, since that version can bypass trial
+limits. Restore data only through a reviewed recovery operation. Never use
+`docker compose down -v` as a release or rollback command.
+
+### Release change inventory and validation
+
+| Files | Purpose |
+| --- | --- |
+| `app/account_auth.py` | Isolated public editor workspaces, preserved invitation rules, atomic signup provisioning and attempt throttling. |
+| `app/main.py` | Optional invitation contract, rejected tenant/role injection and shared throttling for browser/bearer signup. |
+| `app/settings.py`, `.env.example` | Public-registration configuration. The real `.env` is unchanged. |
+| `app/starter_allowances.py`, `app/credit_budgets.py` | One-time $0.001 policies, all-time usage/hold accounting and appropriately sized atomic reservations. |
+| `scripts/migrate_starter_allowances.py` | Additive, repeatable empty policy table; not applied to a live database. |
+| `frontend/src/App.tsx`, `frontend/src/navigation.ts`, `frontend/src/features.ts` | Public signup, disabled Credits navigation/direct rendering and safe post-login destinations. |
+| `frontend/src/LandingPage.tsx` | Public-signup FAQ and CTA copy. |
+| `frontend/src/vite-env.d.ts`, `frontend/.env.example` | Public build-switch types and disabled-by-default configuration. |
+| `frontend/src/App.test.tsx` | Public/signup invitation compatibility and Credits disabled-route/navigation regressions. |
+| `deploy/Dockerfile.web` | Explicit Credits build switch and bundled public assets/notices. |
+| `deploy/Dockerfile.production-api` | Separate CPU-inference production image and non-root runtime. |
+| `deploy/production.compose.yaml`, `deploy/.env.production.example` | Remote-only services, private networks/storage, explicit secrets and disabled purchases. |
+| `deploy/Caddyfile`, `deploy/nginx.production.conf` | Automatic HTTPS, trusted forwarding, shared rate limits and private response headers. |
+| `deploy/init-production-db.sh` | Fresh-remote initialization of pgvector, restricted runtime role and owner default grants. |
+| `scripts/check_production.py`, `scripts/production_entrypoint.py` | Read-only preflight and mandatory API/worker startup checks. |
+| `tests/test_starter_allowances.py` | Transaction rollback, tenant/role isolation, one-time/concurrent accounting, proxy transport and uploads beyond three files. |
+| `tests/test_production_preflight.py` | Read-only behavior, migration presence, runtime permissions, redacted failures and startup gating. |
+| `tests/test_browser_auth.py`, `tests/test_credit_budgets.py`, `tests/test_credits.py` | Updated mock fixtures for the shared throttle and existing users without signup policies. |
+| `.gitignore`, `README.md` | Ignore remote secrets; document configuration, migration, cutover, backups and rollback. |
+
+Validation on October 22, 2026: **501 Python tests passed**, with live DB access
+blocked and startup model loading disabled; **205 frontend tests passed**;
+`npm run build` passed in an isolated copy under `/private/tmp`, preserving
+tracked TypeScript build-state files. Production Compose parsed with synthetic
+values, the initialization shell passed syntax validation, and `git diff --check`
+passed. Existing AnyIO/pytest warnings are nonblocking. Docker was not running,
+so container builds/startup, live PostgreSQL grants/migration, TLS issuance,
+provider billing, actual backup/restore and desktop/mobile browser checks remain
+unverified. No application data or historical reservations were altered. The
+pre-existing deleted PDF patch file was left untouched.
+
 ## Backups and rollback
 
 Before approved schema/data/model maintenance, stop conflicting API/worker
@@ -1316,9 +1561,9 @@ collections, feedback, usage and budgets. They are not future milestones.
 
 Remaining work includes:
 
-- Production TLS/identity integration, verified email, password reset, MFA/SSO,
-  distributed rate limiting, device/session metadata, and richer API-key lifecycle controls.
-- Least-privilege database roles and independent database row-level security;
+- Verified email, password reset, MFA/SSO, multi-host rate limiting,
+  device/session metadata, and richer API-key lifecycle controls.
+- Independent database row-level security (the remote release supplies runtime roles);
   current tenant enforcement is application SQL plus selected tenant constraints.
 - Malware scanning, OCR, document classification/retention, encrypted storage
   policy, object storage and tested backup/disaster recovery.
@@ -1327,7 +1572,8 @@ Remaining work includes:
 - Durable shared telemetry, automated provider-billing reconciliation and
   generation idempotency.
 - Representative follow-up quality evaluation and paginated long RAG chat history.
-- A separately planned public landing page.
+- Next.js migration, public-signup abuse protection, and payment re-enablement
+  are separate follow-ups; the existing public landing page is implemented.
 
 Answer citations are references to retrieved excerpts, not machine-verified
 truth. Feedback is sentiment, not accuracy. Account deactivation does not remove

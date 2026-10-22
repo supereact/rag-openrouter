@@ -1,10 +1,12 @@
 import { useEffect, useState, type MouseEvent } from 'react'
+import { creditsEnabled } from './features'
 
 export const routes = ['/assistant', '/documents', '/dashboard', '/users', '/knowledge-bases', '/audit-log', '/credits', '/support', '/account'] as const
 export function returnDestination(value: string | null): string {
   if (!value || !value.startsWith('/') || value.startsWith('//')) return '/assistant'
   const url = new URL(value, window.location.origin)
   return url.origin === window.location.origin && routes.some(route => route === url.pathname)
+    && (url.pathname !== '/credits' || creditsEnabled())
     ? url.pathname + url.search : '/assistant'
 }
 export function navigate(to: string, replace = false) {

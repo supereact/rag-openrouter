@@ -1,0 +1,17 @@
+{
+    email {$RAG_TLS_EMAIL}
+    # Keep request/query strings out of access logs. Access logging is not enabled.
+}
+
+{$RAG_PUBLIC_HOST} {
+    encode zstd gzip
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+        X-Frame-Options SAMEORIGIN
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        -Server
+    }
+    reverse_proxy web:80
+}

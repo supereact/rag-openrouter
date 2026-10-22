@@ -16,7 +16,7 @@ from fastapi import HTTPException
 from app.db import db_connection
 from app.security import Principal
 from app.usage_ledger import _nonnegative_int, _reported_cost
-from app import credit_wallets
+from app import credit_wallets, starter_allowances
 
 DEFAULT_RESERVE = Decimal('0.01')
 MAX_CREDITS = Decimal('1000000')
@@ -96,9 +96,16 @@ def reserve_request(principal: Principal) -> UUID | None:
             raise HTTPException(status_code=429, detail='OpenRouter generation paused by administrator')
         limit_t = Decimal(str(tenant[0])) if tenant and tenant[0] is not None else None
         limit_u = Decimal(str(user[0])) if user and user[0] is not None else None
-        if limit_t is None and limit_u is None and not prepaid:
+        starter_remaining = starter_allowances.remaining(conn, principal)
+        if limit_t is None and limit_u is None and not prepaid and starter_remaining is None:
             return None
         reserve = Decimal(str(tenant[2])) if tenant else DEFAULT_RESERVE
+        if starter_remaining is not None:
+            if starter_remaining <= 0:
+                raise HTTPException(429, 'Your starter OpenRouter allowance is exhausted. Contact support.')
+            # A new account's entire allowance is smaller than DEFAULT_RESERVE.
+            # Serialize and hold the remaining allowance until cost is reported.
+            reserve = min(reserve, starter_remaining)
         spent_t, spent_u, held_t, held_u = _totals(conn, principal, month_start_utc())
         if (limit_t is not None and spent_t + held_t + reserve > limit_t or
                 limit_u is not None and spent_u + held_u + reserve > limit_u):

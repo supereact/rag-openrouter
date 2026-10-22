@@ -16,6 +16,7 @@ import AuditLogPanel from './AuditLogPanel'
 import CreditsPanel from './CreditsPanel'
 import PageFrame from './PageFrame'
 import Brand from './Brand'
+import { creditsEnabled } from './features'
 import { followLink, navigate, returnDestination, routes, useLocation } from './navigation'
 
 const SupportPanel = lazy(() => import('./SupportPanel'))
@@ -70,7 +71,7 @@ function SignIn({ onLogin, onBrowserLogin, initialMode }: {
       <div className="w-full max-w-[460px] rounded-2xl border border-white/10 bg-white/[.045] p-7 sm:p-9 shadow-2xl">
         <div className="w-12 h-12 grid place-items-center rounded-xl bg-indigo-500/15 text-indigo-300 mb-5"><LockKeyhole size={22}/></div>
         <h1 className="text-[27px] text-white font-semibold tracking-tight">Welcome to KnowledgeBase</h1>
-        <p className="mt-2 text-slate-400 text-sm leading-relaxed">Sign in to your authorized workspace, or register with an invitation.</p>
+        <p className="mt-2 text-slate-400 text-sm leading-relaxed">Sign in to your workspace, or create your own private workspace.</p>
         <div className="flex flex-wrap gap-2 mt-5" role="group" aria-label="Authentication method">
           <button type="button" className={`text-xs px-3 py-2 rounded-lg ${mode === 'password' ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-300'}`} onClick={() => {setMode('password');setError('')}}>Email sign in</button>
           <button type="button" className={`text-xs px-3 py-2 rounded-lg ${mode === 'register' ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-300'}`} onClick={() => {setMode('register');setError('')}}>Sign up</button>
@@ -88,7 +89,8 @@ function SignIn({ onLogin, onBrowserLogin, initialMode }: {
             </div>
           </> : <>
             {mode === 'register' && <><label className="block text-sm text-slate-200" htmlFor="invitation-code">Invitation code</label>
-              <input id="invitation-code" value={invitation} onChange={e => setInvitation(e.target.value)} required autoComplete="off" placeholder="invite_…" className="w-full rounded-lg border border-slate-600 bg-slate-900 p-3 text-white"/>
+              <input id="invitation-code" value={invitation} onChange={e => setInvitation(e.target.value)} autoComplete="off" placeholder="Optional · join an existing workspace" aria-describedby="invitation-help" className="w-full rounded-lg border border-slate-600 bg-slate-900 p-3 text-white"/>
+              <p id="invitation-help" className="text-xs text-slate-400">Leave blank to create a private workspace. Use an invitation to join your team.</p>
               <label className="block text-sm text-slate-200" htmlFor="signup-username">Username</label>
               <input id="signup-username" value={username} onChange={e => setUsername(e.target.value)} required minLength={2} maxLength={80} className="w-full rounded-lg border border-slate-600 bg-slate-900 p-3 text-white"/>
             </>}
@@ -103,7 +105,7 @@ function SignIn({ onLogin, onBrowserLogin, initialMode }: {
               <input id="confirm-password" type="password" autoComplete="new-password" value={confirmPassword}
                 onChange={e => setConfirmPassword(e.target.value)} required minLength={12}
                 className="w-full rounded-lg border border-slate-600 bg-slate-900 p-3 text-white"/>
-              <p className="text-xs text-slate-400">Use a unique password of at least 12 characters. Your administrator supplies the invitation code.</p>
+              <p className="text-xs text-slate-400">Use a unique password of at least 12 characters. New accounts receive a one-time $0.001 OpenRouter usage allowance.</p>
             </>}
           </>}
           {error && <p role="alert" className="text-rose-300 text-sm">{error}</p>}
@@ -519,7 +521,7 @@ export default function App() {
           { key: 'assistant' as const, title: 'Assistant', icon: MessageSquareText },
           { key: 'documents' as const, title: 'Documents', icon: FolderOpen },
           { key: 'knowledge-bases' as const, title: 'Knowledge Bases', icon: BookOpen },
-          { key: 'credits' as const, title: 'Credits', icon: Wallet },
+          ...(creditsEnabled() ? [{ key: 'credits' as const, title: 'Credits', icon: Wallet }] : []),
           { key: 'support' as const, title: 'Support', icon: MessageSquareText },
           { key: 'account' as const, title: 'Account', icon: LockKeyhole },
         ]).map(item => {
@@ -548,8 +550,11 @@ export default function App() {
       </div>
       {path === '/documents' && <DocumentsPanel session={session} onUnauthorized={onUnauthorized}/>}
       {path === '/knowledge-bases' && <KnowledgeBasesPanel session={session} onUnauthorized={onUnauthorized}/> }
-      {path === '/credits' && <CreditsPanel key={`${session.identity.tenant_id}:${session.identity.user_id}:${session.key}`}
+      {path === '/credits' && creditsEnabled() && <CreditsPanel key={`${session.identity.tenant_id}:${session.identity.user_id}:${session.key}`}
         apiKey={session.key} onUnauthorized={onUnauthorized}/>}
+      {path === '/credits' && !creditsEnabled() && <PageFrame title="Credits unavailable" subtitle="Credit purchases are currently disabled.">
+        <p className="p-6">Contact your administrator about your usage allowance.</p>
+      </PageFrame>}
       {path === '/support' && <Suspense fallback={<PageFrame title="Support" subtitle="Private chat with the support team."><p className="p-6" role="status">Loading support…</p></PageFrame>}>
         <SupportPanel key={`${session.identity.tenant_id}:${session.identity.user_id}:${session.key}`}
           apiKey={session.key} onUnauthorized={onUnauthorized}/>

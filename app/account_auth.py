@@ -1,6 +1,6 @@
-"""Invitation-only password accounts and admin management (local development MVP).
+"""Public isolated workspaces, invited accounts and tenant administration.
 
-No public tenant joining: an administrator must issue an email-bound invitation.
+Joining an existing tenant still requires an email-bound invitation.
 Session bearer tokens and invitation codes are stored as SHA-256 digests;
 password hashes use PBKDF2-HMAC-SHA256 with a random salt.
 """
@@ -18,6 +18,7 @@ from fastapi import HTTPException
 
 from app.db import db_connection
 from app.security import Principal, key_digest
+from app import settings, starter_allowances
 
 PASSWORD_ITERATIONS = 600_000
 SESSION_HOURS = 12
@@ -62,7 +63,7 @@ def verify_password(password: str, encoded: str | None) -> bool:
 
 
 class LoginThrottle:
-    """In-process best-effort throttle; replace with shared limiter before public deployment."""
+    """In-process throttle; production also rate-limits at the shared web proxy."""
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._failed: dict[str, tuple[int, float]] = {}
@@ -92,8 +93,23 @@ class LoginThrottle:
         with self._lock:
             self._failed.pop(identifier, None)
 
+    def consume(self, identifier: str) -> bool:
+        """Atomically count every signup attempt, including successful signups."""
+        now = time.monotonic()
+        with self._lock:
+            count, expiry = self._failed.get(identifier, (0, now + 900))
+            if expiry < now:
+                count, expiry = 0, now + 900
+            if count >= 8:
+                return False
+            if identifier not in self._failed and len(self._failed) >= 5000:
+                self._failed.pop(next(iter(self._failed)))
+            self._failed[identifier] = (count + 1, expiry)
+            return True
+
 
 login_throttle = LoginThrottle()
+registration_throttle = LoginThrottle()
 
 
 def _session(conn, user_id: int) -> dict:
@@ -129,24 +145,36 @@ def register(code: str, email: str, username: str, password: str) -> dict:
     normalized = normalize_email(email)
     if not USERNAME_REGEX.fullmatch(username):
         raise ValueError('Username must be 2–80 letters, numbers, dots, hyphens or underscores')
-    if not code.startswith('invite_') or len(code) < 35:
+    if code and (not code.startswith('invite_') or len(code) < 35):
         raise ValueError('Invalid or expired invitation')
+    if not code and settings.RAG_PUBLIC_REGISTRATION_ENABLED != 'true':
+        raise HTTPException(403, 'Public registration is disabled. An invitation is required.')
     validate_password(password)
+    pw_hash = hash_password(password)
     with db_connection() as conn:
-        invite = conn.execute('''SELECT id,tenant_id,email,role FROM signup_invitations
-            WHERE code_hash=%s AND used_at IS NULL AND expires_at>now() FOR UPDATE''',
-            (key_digest(code),)).fetchone()
-        if invite is None or invite[2] != normalized:
-            raise ValueError('Invalid or expired invitation')
-        pw_hash = hash_password(password)
+        invite = None
+        if code:
+            invite = conn.execute('''SELECT id,tenant_id,email,role FROM signup_invitations
+                WHERE code_hash=%s AND used_at IS NULL AND expires_at>now() FOR UPDATE''',
+                (key_digest(code),)).fetchone()
+            if invite is None or invite[2] != normalized:
+                raise ValueError('Invalid or expired invitation')
+            tenant_id, role = invite[1], invite[3]
+        else:
+            # A public request cannot select a tenant, role or administrator ID.
+            tenant_id = conn.execute('INSERT INTO tenants(slug) VALUES (%s) RETURNING id',
+                ('workspace-' + secrets.token_hex(16),)).fetchone()[0]
+            role = 'editor'
         try:
             user_id = conn.execute('''INSERT INTO app_users
                 (tenant_id,username,role,email,password_hash)
                 VALUES (%s,%s,%s,%s,%s) RETURNING id''',
-                (invite[1], username, invite[3], normalized, pw_hash)).fetchone()[0]
+                (tenant_id, username, role, normalized, pw_hash)).fetchone()[0]
         except psycopg.errors.UniqueViolation as exc:
             raise ValueError('Email or username is already registered') from exc
-        conn.execute('UPDATE signup_invitations SET used_at=now() WHERE id=%s', (invite[0],))
+        starter_allowances.provision(conn, tenant_id, user_id)
+        if invite:
+            conn.execute('UPDATE signup_invitations SET used_at=now() WHERE id=%s', (invite[0],))
         return _session(conn, int(user_id))
 
 

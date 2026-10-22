@@ -362,15 +362,17 @@ def observability(principal: Principal = Depends(require_principal)):
 
 
 # M10: email/password accounts and tenant-scoped administration.
-# All public registration requires an email-bound invitation from an admin.
+# Public signups create isolated tenants; existing-tenant joins need invitations.
 class LoginBody(BaseModel):
     email: str = Field(min_length=3, max_length=254)
     password: str = Field(min_length=1, max_length=512)
 
 
 class RegisterBody(LoginBody):
-    invitation_code: str = Field(min_length=35, max_length=256)
+    invitation_code: str = Field(default='', max_length=256)
     username: str = Field(min_length=2, max_length=80)
+
+    model_config = {'extra': 'forbid'}
 
 
 class InviteBody(BaseModel):
@@ -390,7 +392,8 @@ def password_login(body: LoginBody, request: Request):
 
 
 @app.post('/auth/register', status_code=201)
-def password_register(body: RegisterBody):
+def password_register(body: RegisterBody, request: Request):
+    _registration_attempt(request)
     try:
         return account_auth.register(body.invitation_code, body.email,
                                      body.username, body.password)
@@ -420,12 +423,19 @@ def browser_login(body: LoginBody, request: Request, response: Response):
 @app.post('/auth/browser/register', status_code=201)
 def browser_register(body: RegisterBody, request: Request, response: Response):
     browser_auth.check_browser_transport(request)
+    _registration_attempt(request)
     try:
         result = account_auth.register(body.invitation_code, body.email,
                                        body.username, body.password)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return browser_auth.start_session(response, request, result)
+
+
+def _registration_attempt(request: Request) -> None:
+    ip = request.client.host if request.client else 'unknown'
+    if not account_auth.registration_throttle.consume(ip):
+        raise HTTPException(429, 'Too many registration attempts. Try again later.')
 
 
 @app.get('/auth/session')

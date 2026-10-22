@@ -26,3 +26,6 @@ RAG_PAYMENTS_CALLBACK_BASE_URL = os.getenv('RAG_PAYMENTS_CALLBACK_BASE_URL', '')
 
 # Explicit global support access; only listed active administrator accounts qualify.
 RAG_SUPPORT_STAFF_USER_IDS = os.getenv('RAG_SUPPORT_STAFF_USER_IDS', '')
+
+# Public signups create isolated workspaces; invitations retain their own scope.
+RAG_PUBLIC_REGISTRATION_ENABLED = os.getenv('RAG_PUBLIC_REGISTRATION_ENABLED', 'true').strip().lower()
