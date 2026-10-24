@@ -1787,6 +1787,16 @@ builds; local edits alone do not deploy. Use another branch for review work.
 Check each deployment's Git source SHA, build result and custom-domain health
 after pushing. A connected repository alone does not prove a successful build.
 
+The first verification push (`d395673`) reached both projects and created
+Git-sourced production deployments with the matching SHA. Both were blocked
+before building because the commit author lacked deployment permission. The
+previous live deployments were preserved. Future commits now use the owner's
+chosen `supereact` identity in this repository's local Git configuration;
+shared history and global Git settings remain unchanged. Verify a subsequent
+Git deployment succeeds before treating automatic publishing as operational.
+The author email must be associated with the intended account. See Vercel's
+[commit attribution guidance](https://vercel.com/docs/deployments/troubleshoot-project-collaboration).
+
 Preview credentials currently use the disposable Neon validation branch,
 scheduled to expire October 26, 2026. Configure a separate lasting preview
 database/storage environment before relying on ongoing pull-request previews;
