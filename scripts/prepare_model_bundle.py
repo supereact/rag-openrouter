@@ -11,12 +11,16 @@ from pathlib import Path
 import re
 
 
+class BundleConfigurationError(ValueError):
+    """Our static validation messages are safe to show in a cloud build log."""
+
+
 def prepare(output: Path, *, offline: bool = False, require_cpu: bool = False,
             require_revisions: bool = False) -> dict:
     if output.exists():
-        raise ValueError('Model bundle output already exists; use a new build directory')
+        raise BundleConfigurationError('Model bundle output already exists; use a new build directory')
     if os.getenv('RAG_MODEL_BUNDLE'):
-        raise ValueError('Build from original model IDs, not a previous bundle')
+        raise BundleConfigurationError('Build from original model IDs, not a previous bundle')
     if offline:
         os.environ.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1')
     # Imports happen after offline/cache flags have been selected. Settings read
@@ -26,12 +30,12 @@ def prepare(output: Path, *, offline: bool = False, require_cpu: bool = False,
     from sentence_transformers import SentenceTransformer, CrossEncoder
     import torch
     if require_cpu and torch.version.cuda is not None:
-        raise ValueError('Install the CPU-only PyTorch build before packaging')
+        raise BundleConfigurationError('Install the CPU-only PyTorch build before packaging')
     mode = os.getenv('RAG_RETRIEVAL_MODE', 'vector').strip().lower()
     if mode not in ('vector', 'hybrid', 'rerank'):
-        raise ValueError('Invalid retrieval mode')
+        raise BundleConfigurationError('Invalid retrieval mode')
     if mode == 'rerank' and EMBEDDING_MODEL == RERANKER_MODEL:
-        raise ValueError('Embedding and reranker must be distinct model types')
+        raise BundleConfigurationError('Embedding and reranker must be distinct model types')
     models = {}
     revisions = {}
     selections = [(EMBEDDING_MODEL, 'embedding', SentenceTransformer, os.getenv('RAG_EMBEDDING_REVISION', ''))]
@@ -39,7 +43,7 @@ def prepare(output: Path, *, offline: bool = False, require_cpu: bool = False,
         selections.append((RERANKER_MODEL, 'reranker', CrossEncoder, os.getenv('RAG_RERANKER_REVISION', '')))
     for _, _, _, revision in selections:
         if (revision or require_revisions) and not re.fullmatch(r'[0-9a-f]{40}', revision):
-            raise ValueError('Pin selected models to full Hugging Face commit revisions')
+            raise BundleConfigurationError('Pin selected models to full Hugging Face commit revisions')
     output.mkdir(parents=True)
     for name, directory, factory, revision in selections:
         options = {'revision': revision} if revision else {}
@@ -47,7 +51,7 @@ def prepare(output: Path, *, offline: bool = False, require_cpu: bool = False,
         if directory == 'embedding':
             dimension = getattr(model, 'get_embedding_dimension', None) or model.get_sentence_embedding_dimension
             if dimension() != 384:
-                raise ValueError('The application requires 384-dimensional embeddings')
+                raise BundleConfigurationError('The application requires 384-dimensional embeddings')
         model.save(str(output / directory), safe_serialization=True, create_model_card=False)
         models[name] = directory
         if revision:
@@ -72,6 +76,9 @@ def main() -> int:
         prepare(args.output, offline=args.offline, require_cpu=args.require_cpu,
                 require_revisions=args.require_revisions)
         return 0
+    except BundleConfigurationError as exc:
+        print(f'FAIL: model packaging configuration: {exc}')
+        return 1
     except Exception as exc:
         print(f'FAIL: model packaging ({type(exc).__name__}); inspect build configuration privately')
         return 1

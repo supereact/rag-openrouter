@@ -108,6 +108,34 @@ def test_pinned_release_packages_both_selected_revisions(fake_models, monkeypatc
     assert fake_models == ['embed','rank']
 
 
+def test_worker_default_release_pins_match_runtime_reference_when_builder_omits_args():
+    from dotenv import dotenv_values
+    root=Path(__file__).resolve().parents[1]
+    defaults={}
+    for line in (root/'Dockerfile.vercel-worker').read_text().splitlines():
+        if line.startswith('ARG '):
+            key,separator,value=line[4:].partition('=')
+            if separator:defaults[key]=value
+    reference=dotenv_values(root/'deploy/.env.vercel.example',interpolate=False)
+    for key in ('EMBEDDING_MODEL','RERANKER_MODEL','RAG_RETRIEVAL_MODE','RAG_EMBEDDING_REVISION','RAG_RERANKER_REVISION'):
+        assert defaults[key] == reference[key]
+    assert len(defaults['RAG_EMBEDDING_REVISION']) == len(defaults['RAG_RERANKER_REVISION']) == 40
+
+
+def test_cli_reports_only_safe_configuration_messages(fake_models, monkeypatch, tmp_path, capsys):
+    from scripts import prepare_model_bundle as bundle
+    monkeypatch.setenv('RAG_RETRIEVAL_MODE','rerank')
+    monkeypatch.setattr(sys,'argv',['prepare_model_bundle','--output',str(tmp_path/'bundle'),'--require-revisions'])
+    assert bundle.main() == 1
+    assert 'Pin selected models to full Hugging Face commit revisions' in capsys.readouterr().out
+    def private_error(*args,**kwargs):
+        raise ValueError('synthetic-private-provider-detail')
+    monkeypatch.setattr(bundle,'prepare',private_error)
+    assert bundle.main() == 1
+    output=capsys.readouterr().out
+    assert 'synthetic-private-provider-detail' not in output
+
+
 def test_runtime_rejects_revision_drift_without_loading_model(monkeypatch, tmp_path):
     (tmp_path / 'embedding').mkdir()
     (tmp_path / 'manifest.json').write_text(json.dumps({'version':1,'models':{'model':'embedding'},'revisions':{'model':'a'*40}}))

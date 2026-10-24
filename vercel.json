@@ -16,7 +16,7 @@
     "ingestion": {
       "root": ".",
       "entrypoint": "Dockerfile.vercel-worker",
-      "instances": {"sin1": 0},
+      "instances": {"sin1": 1},
       "resources": {"requests": {"memory": "2Gi"}},
       "terminationGracePeriodSeconds": 600
     }

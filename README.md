@@ -12,8 +12,9 @@ conversations, accounts, usage, budgets, and feedback.
 This README consolidates the former `docs/*.md` milestone guides and describes
 the checked-out implementation. Historical patch instructions are superseded:
 use the current files and migration scripts. Neon database/private-storage setup
-is described below, alongside the optional VPS configuration. The public Vercel
-application has not been deployed or security-assessed.
+is described below, alongside the optional VPS configuration. The Vercel release
+uses `rag.weichen.space` for the frontend and `api-rag.weichen.space` for the API.
+Deployment checks do not constitute an independent security assessment.
 
 ## Contents
 
@@ -1405,13 +1406,13 @@ retains its database record if object cleanup fails. Stale-job recovery checks
 the selected storage backend. Object storage and PostgreSQL are separate systems;
 an object cleanup failure can leave an orphan requiring operator review.
 
-This setup proves Neon connectivity and storage through the current API. It is
-**not a complete Vercel compute deployment**. The opt-in direct upload flow below
+This setup proves Neon connectivity and storage through the current API. See
+the Vercel compute section below for deployment verification. The direct upload flow below
 bypasses the function-request body limit for new library uploads. Existing
 synchronous uploads and PDF replacement/reindex still send multipart bodies to
 FastAPI and remain subject to the hosting platform's request-size limit.
-Model packaging/memory, daemon shutdown, platform rate limits and actual
-Vercel runtime behavior also need validation before public launch. The VPS
+Platform quotas, concurrent model memory and large-document shutdown behavior
+still need monitoring under production traffic. The VPS
 preflight below remains specific to the optional VPS deployment; use
 `scripts.check_neon` for Neon database/storage checks.
 
@@ -1467,7 +1468,10 @@ Production activation, after selecting a frontend domain:
    signed uploads are limited to their temporary key and byte count.
 3. Set frontend `VITE_DIRECT_UPLOADS=true` and the existing public
    `VITE_API_BASE_URL`, then rebuild/redeploy. The switch defaults to `false`.
-   No frontend domain has been selected and production is **not enabled** yet.
+   The current frontend uses `https://api-rag.weichen.space` with direct uploads
+   enabled. A real upload above 4.5 MiB passed through the deployed preview API
+   and private storage. Production storage preflight permits the app origin
+   through the provider's existing wildcard rule; it is not an exact-origin rule.
 4. Test sign-in, multiple uploads, processing status, citation/PDF access and
    forbidden-user behavior in the deployed browser. Large replacement/reindex
    needs a separate direct-upload change before it can bypass function limits.
@@ -1506,8 +1510,9 @@ URL and `VITE_DIRECT_UPLOADS=true` in an isolated temporary copy. The direct
 live smoke passed all checks above, including real worker processing, PDF
 round-trip/ranges, physical-page citations, tenant isolation, empty-source
 budget handling, staging cleanup and denial of unsigned original-PDF reads.
-CORS used the provider's existing wildcard response. A deployed browser and
-Vercel runtime were not tested. Local `.env` and tracked TypeScript build-state
+CORS used the provider's existing wildcard response. These were the initial
+local checks; subsequent Vercel runtime checks are recorded below. A deployed
+browser remains unverified. Local `.env` and tracked TypeScript build-state
 checksums remained unchanged; `git diff --check` passed.
 
 | Direct-upload changed files | Purpose |
@@ -1580,14 +1585,15 @@ Rollback: use the prior code and ordinary local startup with the original local
 without an explicit file migration. No local data was moved. Do not delete Neon
 databases/buckets or reset volumes as a code rollback shortcut.
 
-## Vercel API and worker deployment preparation
+## Vercel API and worker deployment
 
 The frontend remains the existing Vite app in a separate Vercel project. A
 second Vercel project at the **repository root** can build the FastAPI backend
 and the ingestion Daemon. There are no frontend-to-backend rewrites. Neon holds
 the existing schema and private objects; no local database is imported.
 
-This configuration is prepared, not deployed or proven on Vercel. As of October
+The API and frontend have passed Vercel preview builds and cloud runtime checks.
+As of October
 24, 2026, Vercel documents [large Python Functions](https://vercel.com/docs/functions/limitations)
 up to 5 GB with Fluid compute, and [Daemons](https://vercel.com/docs/daemons) for
 container-based continuous workers. These are beta features. The
@@ -1608,8 +1614,8 @@ to evaluate, not a promise of unlimited free production hosting.
   and immutable revisions. It copies only approved source, installs models at
   build time and runs as an unprivileged user. Runtime credentials are never
   image build arguments. Only public model IDs/revisions are consumed there.
-- The Daemon starts with **zero instances**. It cannot consume production jobs
-  until enabled deliberately. It polls every 15 seconds and receives up to 600
+- The release configures **one Singapore ingestion instance**, enabled after
+  Linux validation against the isolated Neon branch. It polls every 15 seconds and receives up to 600
   seconds to drain on termination. `SIGTERM` and `SIGINT` stop the existing
   worker loop after current work finishes; idle/error waits stop promptly.
 - `scripts.prepare_model_bundle` serializes selected models into a new
@@ -1627,8 +1633,8 @@ to evaluate, not a promise of unlimited free production hosting.
    frontend and `api.example.com` for FastAPI. Two separate default
    `*.vercel.app` project domains do not satisfy this app's strict same-site
    browser-session policy. Keep the existing secure cookie/CSRF rules; set the
-   API's `RAG_ALLOWED_ORIGINS` to the exact frontend origin. No domain has been
-   selected yet.
+   API's `RAG_ALLOWED_ORIGINS` to the exact frontend origin. This release uses
+   `https://rag.weichen.space` and `https://api-rag.weichen.space` respectively.
 2. Import the repository as a **backend** Vercel project, Root Directory `.`.
    Select FastAPI and use the checked-in install/build commands. Enable Fluid
    compute and `VERCEL_SUPPORT_LARGE_FUNCTIONS=1`. Add the backend variables
@@ -1674,7 +1680,8 @@ to evaluate, not a promise of unlimited free production hosting.
    Confirm its job, indexed chunks, original bytes and permissions on that same
    branch. No local PostgreSQL container or data volume is needed. A Mac model
    smoke alone does not verify the Linux image, memory budget or startup time.
-7. Deploy the API with the worker still at zero instances. Check HTTPS `/health`
+7. For a new environment, set the worker to zero instances before the first
+   API deployment (the validated release now defaults to one). Check HTTPS `/health`
    and model startup. Daemons run only in production during the beta; preview
    deployments and `vercel dev` cannot rehearse the Daemon. Once the image and
    environment are verified, change `daemons.ingestion.instances.sin1` from `0`
@@ -1684,7 +1691,9 @@ to evaluate, not a promise of unlimited free production hosting.
    Set `VITE_API_BASE_URL=https://api.example.com` and
    `VITE_CREDITS_ENABLED=false`, using your actual API URL. Keep
    `VITE_DIRECT_UPLOADS=false` until the direct-upload activation checks above
-   pass. Set the custom domains, redeploy and verify sign-in, F5 restoration,
+   pass. This release enables direct uploads after the cloud upload/storage
+   checks, with the provider CORS limitation documented above. Set the custom
+   domains, redeploy and verify sign-in, F5 restoration,
    sign-out, multiple uploads, processing, citations and forbidden-user access
    in a browser. No backend rewrite is configured.
 
@@ -1703,31 +1712,68 @@ its matching model bundle together. The database schema is unchanged.
 
 ### Compute verification and changed files
 
+Production release verified October 24, 2026:
+
+| Service | Address / project | Verified state |
+| --- | --- | --- |
+| Frontend | `https://rag.weichen.space` / `weichen-rag` | Vercel production deployment READY; public HTTPS and static page links. |
+| API | `https://api-rag.weichen.space` / `weichen-rag-api` | Production READY; `/health` confirms Neon connectivity. |
+| Worker | Backend project's `ingestion` Daemon | One ready/live `sin1` instance, 2 GiB; no scaling override. |
+
+The release was uploaded directly from isolated local source snapshots using
+the authenticated Vercel CLI. A connected Git repository is not required;
+future local edits are not automatically deployed. Backend and frontend remain
+separate projects. Only selected runtime secrets were transferred through
+private environment-variable input; owner database credentials, real `.env`,
+local documents and caches were excluded from the deployment sources.
+
+Production frontend variables are `VITE_API_BASE_URL=https://api-rag.weichen.space`,
+`VITE_DIRECT_UPLOADS=true`, and `VITE_CREDITS_ENABLED=false`. Backend registration
+is public, purchases are disabled and new accounts retain the one-time $0.001
+starter allowance. No file-count limit was introduced. Sign up at
+`https://rag.weichen.space/login?mode=register`.
+
+Read-only public checks confirm protected document/admin/session endpoints deny
+unauthenticated requests, credentialed API CORS permits the exact app origin
+and rejects an unrelated origin, and unknown frontend paths return 404. No
+runtime error clusters appeared in the selected monitoring window. Instance
+resource metrics and daemon runtime logs were unavailable through the queried
+tools; readiness alone is not a production ingestion or load test. Complete
+browser sign-in/F5 restoration and a small real upload manually before inviting
+users. No browser was connected for this release's visual checks. Paid answer
+generation was not tested.
+
 The prepared root configuration passed Vercel's official JSON Schema. Local
 offline packaging produced **174.7 MiB** of selected embedding/reranker models;
 both successfully ran real inference from the bundle with database access
 blocked and the provider disabled. Tests also send real process termination
 signals while synthetic jobs run. No live application records were changed.
 
-The complete Python suite passed **603 tests**, the frontend suite passed
+The complete Python suite passed **605 tests**, the frontend suite passed
 **220 tests**, and `npm run build` passed in an isolated Vercel-mode frontend
 build. Existing pytest/AnyIO warnings remain nonblocking. `git diff --check`
 passed, and local `.env`/tracked TypeScript build-state checksums are unchanged.
 
-Docker is now available. The Linux `amd64` base image downloaded after a retry,
-but the worker build failed while downloading the 196.3 MB CPU PyTorch wheel.
-The transfer timed out again with a 120-second read timeout. The worker image
-and Vercel installation command now use that longer timeout for large downloads;
-JSON syntax and `git diff --check` pass. Linux worker/integration verification
-remains incomplete until the download succeeds. No existing containers/volumes
-were changed, and no Vercel deployment or account change was performed.
+The cloud-built Linux `amd64` worker exposed two release issues: the builder
+omitted revision arguments, and serialized weights were readable only by root.
+The image now defaults to the selected immutable revisions and assigns its
+model bundle to runtime UID 10001. Packaging errors show safe configuration
+messages while withholding arbitrary dependency exception details.
+
+The corrected non-root worker completed synthetic PDF and Markdown jobs at
+1 CPU / 2 GiB against the isolated validation branch. Deployed preview checks
+passed secure-cookie registration/session restoration/sign-out, unauthenticated
+and editor/admin denial, a PDF above 4.5 MiB through signed storage upload,
+original-PDF byte/range retrieval, physical-page citations, tenant isolation,
+and an empty-source answer without paid generation. No production fixtures,
+local database imports or paid provider calls were used. Browser visual and
+cross-origin cookie checks remain outstanding because no browser was connected.
 The bundle size above excludes Python dependencies and is not the final Linux
-function/image size. Schema validation does not prove a cloud build or runtime
-succeeds.
+function/image size.
 
 | Changed files | Purpose |
 | --- | --- |
-| `vercel.json`, `pyproject.toml`, `.python-version` | Separate root FastAPI project, explicit entrypoint/Python version, CPU build and disabled ingestion Daemon. |
+| `vercel.json`, `pyproject.toml`, `.python-version` | Separate root FastAPI project, explicit entrypoint/Python version, CPU build and one ingestion Daemon instance. |
 | `Dockerfile.vercel-worker`, `.dockerignore` | CPU-only, non-root worker image with immutable model artifacts and restricted build context. |
 | `scripts/prepare_model_bundle.py` | Build selected models, verify dimensions/CPU/revisions and create a completed manifest. |
 | `app/model_loading.py`, `app/hosted_runtime.py` | Optional bundle lookup, revision checks, offline hosted startup and fail-closed storage selection. |
