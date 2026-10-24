@@ -1771,6 +1771,45 @@ cross-origin cookie checks remain outstanding because no browser was connected.
 The bundle size above excludes Python dependencies and is not the final Linux
 function/image size.
 
+### Git deployments and production monitoring
+
+The source repository is `https://github.com/supereact/rag-openrouter`, with
+`main` as the intended production branch. The verified release fixes were
+pushed in commit `35fe04b`. Configure both existing Vercel projects against this
+same repository; keep the frontend Root Directory at `frontend` and the backend
+Root Directory at the repository root. Keep all current environment variables
+and custom domains. Do not create replacement projects or import local data.
+
+Connection status, October 24, 2026: both existing projects are linked to
+`supereact/rag-openrouter` after authorizing the Vercel GitHub app. Both use
+`main` as their production branch. Pushes to that branch trigger production
+builds; local edits alone do not deploy. Use another branch for review work.
+Check each deployment's Git source SHA, build result and custom-domain health
+after pushing. A connected repository alone does not prove a successful build.
+
+Preview credentials currently use the disposable Neon validation branch,
+scheduled to expire October 26, 2026. Configure a separate lasting preview
+database/storage environment before relying on ongoing pull-request previews;
+never substitute production database credentials for preview isolation.
+
+Use the existing platform monitoring without adding a paid integration:
+
+```bash
+# Defaults to recent logs; older windows may exceed Hobby retention.
+vercel logs --project weichen-rag-api --scope supereacts-projects --environment production --query 'level:error OR level:fatal'
+vercel logs --project weichen-rag --scope supereacts-projects --environment production --query 'level:error OR level:fatal'
+vercel daemons inspect ingestion --project weichen-rag-api --scope supereacts-projects --json
+vercel usage --scope supereacts-projects --group-by project
+```
+
+Both projects returned zero error/fatal records in the queried 30-minute window
+on October 24, 2026. This is a limited observation, not continuous monitoring.
+The billing API returned cost data unavailable for the selected date range;
+do not interpret that as zero usage or cost. Check **Usage** in the Vercel team
+dashboard, database/storage usage in Neon, and tenant provider usage/budgets in
+the app's admin dashboard. No paid monitoring service, scheduled checks, alert
+delivery or billing changes were configured.
+
 | Changed files | Purpose |
 | --- | --- |
 | `vercel.json`, `pyproject.toml`, `.python-version` | Separate root FastAPI project, explicit entrypoint/Python version, CPU build and one ingestion Daemon instance. |
