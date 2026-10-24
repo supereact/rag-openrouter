@@ -22,6 +22,16 @@ def test_smoke_all_three_checks(monkeypatch, capsys):
     assert capsys.readouterr().out.count('PASS') == 3
 
 
+def test_direct_api_smoke_uses_backend_paths_without_proxy(monkeypatch):
+    called = []
+    def probe(url, *, expected, timeout=10):
+        called.append((url, expected))
+        return expected
+    monkeypatch.setattr(smoke, 'probe', probe)
+    assert smoke.run('https://api.example.com/', api_only=True)
+    assert called == [('https://api.example.com/health', 200), ('https://api.example.com/documents', 401)]
+
+
 def test_smoke_fails_closed_when_auth_is_missing(monkeypatch):
     def fake(url, *, expected, timeout=10):
         return 200  # /api/documents is accidentally unprotected

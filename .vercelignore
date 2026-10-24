@@ -1,0 +1,22 @@
+# Deploy code and public assets only. Production credentials come from Vercel.
+.env*
+**/.env*
+.neon
+.agents/
+.aws/
+.codex/
+.vercel/
+.venv/
+.git/
+node_modules/
+frontend/node_modules/
+frontend/dist/
+.model_cache/
+model_bundle/
+.original_pdfs/
+.ingestion_spool/
+backups/
+*.dump
+*.patch
+__pycache__/
+.pytest_cache/

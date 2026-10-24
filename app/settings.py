@@ -1,8 +1,15 @@
 """Read local development configuration from environment variables."""
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+_env_file = os.getenv('RAG_ENV_FILE')
+if _env_file:
+    if not Path(_env_file).is_file():
+        raise RuntimeError('The selected RAG_ENV_FILE does not exist')
+    load_dotenv(_env_file)
+else:
+    load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 EMBEDDING_MODEL = os.getenv(
@@ -29,3 +36,12 @@ RAG_SUPPORT_STAFF_USER_IDS = os.getenv('RAG_SUPPORT_STAFF_USER_IDS', '')
 
 # Public signups create isolated workspaces; invitations retain their own scope.
 RAG_PUBLIC_REGISTRATION_ENABLED = os.getenv('RAG_PUBLIC_REGISTRATION_ENABLED', 'true').strip().lower()
+
+# Exact frontend origins allowed to call the API directly, comma-separated.
+RAG_ALLOWED_ORIGINS = os.getenv('RAG_ALLOWED_ORIGINS', '')
+
+# Local storage remains the default; Neon is an explicit production opt-in.
+RAG_STORAGE_BACKEND = os.getenv('RAG_STORAGE_BACKEND', 'local').strip().lower()
+RAG_DOCUMENTS_BUCKET = os.getenv('RAG_DOCUMENTS_BUCKET', 'rag-documents')
+RAG_UPLOADS_BUCKET = os.getenv('RAG_UPLOADS_BUCKET', 'rag-uploads')
+RAG_UPLOAD_SIGNING_KEY = os.getenv('RAG_UPLOAD_SIGNING_KEY', '')

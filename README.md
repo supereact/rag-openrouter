@@ -11,8 +11,9 @@ conversations, accounts, usage, budgets, and feedback.
 
 This README consolidates the former `docs/*.md` milestone guides and describes
 the checked-out implementation. Historical patch instructions are superseded:
-use the current files and migration scripts. A single-server production release
-configuration is provided below; it has not been deployed or security-assessed.
+use the current files and migration scripts. Neon database/private-storage setup
+is described below, alongside the optional VPS configuration. The public Vercel
+application has not been deployed or security-assessed.
 
 ## Contents
 
@@ -35,6 +36,7 @@ configuration is provided below; it has not been deployed or security-assessed.
 - [Worker operations and recovery](#worker-operations-and-recovery)
 - [Testing and evaluation](#testing-and-evaluation)
 - [Optional Docker deployment rehearsal](#optional-docker-deployment-rehearsal)
+- [Neon database and object storage](#neon-database-and-object-storage)
 - [Production release](#production-release)
 - [Backups and rollback](#backups-and-rollback)
 - [Troubleshooting](#troubleshooting)
@@ -52,6 +54,7 @@ configuration is provided below; it has not been deployed or security-assessed.
 | Administration and history | Usage ledger, credit reservations, conversations, collections, feedback, audit and metrics | Modules under `app/` with matching names |
 | PostgreSQL | Documents, chunks and 384-dimensional vectors, users, ACLs, jobs, sessions, accounting and history | `app/db.py`, `scripts/migrate_*.py` |
 | Private filesystem | Original PDFs, staged uploads, downloaded model weights | `.original_pdfs/`, `.ingestion_spool/`, model cache |
+| Optional private object storage | Neon originals and staged uploads, selected explicitly for cloud processes | `app/object_storage.py`, `neon.ts` |
 | React frontend | URL navigation, assistant, PDF viewer, management tables and dashboards | `frontend/src/` |
 
 An upload goes through validation, staging, a PostgreSQL-backed job, extraction,
@@ -175,23 +178,24 @@ scripts and already-applied schema, obtain approval for the maintenance, take a
 backup, and stop the API and **all** workers first. Migrations are designed to
 be repeatable; they are not automatically run at API startup.
 
-For a fresh database, or an approved upgrade needing these migrations, use this
-dependency-safe order:
+Use the single schema entrypoint. Its default is an offline preview with no
+database connection. Applying changes requires owner/migration credentials:
 
 ```bash
-python -m scripts.init_db
-python -m scripts.migrate_security
-python -m scripts.migrate_accounts
-python -m scripts.migrate_ingestion_jobs
-python -m scripts.migrate_usage_ledger
-python -m scripts.migrate_credit_budgets
-python -m scripts.migrate_starter_allowances
-python -m scripts.migrate_credits
-python -m scripts.migrate_conversations
-python -m scripts.migrate_knowledge_bases
-python -m scripts.migrate_answer_feedback
-python -m scripts.migrate_support
+python -m scripts.setup_database
+# Approved fresh, empty database only:
+python -m scripts.setup_database --apply
+# Approved existing database, after backup and stopping API/workers:
+python -m scripts.setup_database --apply --upgrade
 ```
+
+The runner acquires a PostgreSQL advisory lock to prevent concurrent runners,
+refuses a nonempty database without `--upgrade`, and runs the existing modules
+in the table order below. Each module commits separately: a later failure does
+not roll back earlier modules. Fix the cause and rerun the approved command;
+never reset data to recover. Legacy ownership backfills still require review.
+It does not seed demo data or start services. Add `--fts-index` to include the
+existing optional keyword index. This is a migration runner, not a new schema.
 
 | Script | Schema purpose and upgrade considerations |
 | --- | --- |
@@ -256,6 +260,13 @@ consistent settings in API, worker, and maintenance terminals.
 | Setting | Meaning |
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL connection URL; required for database operations. URL-encode special characters in credentials. |
+| `RAG_ENV_FILE` | Optional explicit settings file. An unavailable selected file fails rather than loading local `.env`. Use `scripts.run_neon` for isolated cloud configuration. |
+| `RAG_STORAGE_BACKEND` | `local` by default; `s3` enables private Neon object storage. API and worker must use the same mode/database/buckets. |
+| `RAG_DOCUMENTS_BUCKET`, `RAG_UPLOADS_BUCKET` | Separate private buckets, default `rag-documents` and `rag-uploads`. |
+| `AWS_ENDPOINT_URL_S3`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Server-only Neon storage variables; required in S3 mode. Explicit HTTPS endpoint, SigV4 and path-style addressing. Never expose credentials in frontend variables. |
+| `RAG_ALLOWED_ORIGINS` | Comma-separated exact frontend origins for credentialed CORS. Empty by default; production requires HTTPS, e.g. `https://app.example.com`. No wildcards. Local direct requests may use `http://localhost:5173`. |
+| `VITE_API_BASE_URL` | Public frontend **build-time** backend URL, e.g. `https://api.example.com`. HTTPS required except HTTP loopback. Blank retains the existing local `/api` proxy. Set in Vercel and rebuild after changes; never put credentials here. |
+| `VITE_CREDITS_ENABLED` | Frontend build switch; keep `false` for this release, alongside disabled backend payments. |
 | `EMBEDDING_MODEL` | Default in code: `sentence-transformers/all-MiniLM-L6-v2`, 384 dimensions. Must match every stored embedding. |
 | `RERANKER_MODEL` | Default in code: `cross-encoder/ms-marco-MiniLM-L-6-v2`. Used in rerank mode. |
 | `RAG_RETRIEVAL_MODE` | `vector`, `hybrid`, or `rerank`. Code fallback is `vector`; `.env.example` selects `rerank`. |
@@ -303,8 +314,8 @@ The sidebar/mobile navigation uses real links and browser History APIs. Direct
 URLs, refresh, and Back/Forward work. Internal return destinations survive
 sign-in and are checked against application routes. Admin-only destinations are
 checked in navigation and route handling, with backend authorization remaining
-authoritative. Unknown paths show a not-found view. Until a public landing page
-is added, `/` redirects to sign-in or Assistant.
+authoritative. Unknown paths show a not-found view. `/` serves the existing
+public landing page.
 
 The application is constrained to the viewport: navigation and page headers
 remain stationary while each page's content scrolls. Navigating between pages
@@ -407,11 +418,18 @@ also applies shared Nginx IP limits. Email verification, password recovery and
 CAPTCHA are not implemented; public signup does not prove ownership of an email.
 
 Cookie requests use `X-RAG-CSRF: 1`; cookie-authenticated writes and browser
-session endpoints enforce the applicable same-origin checks. No credentialed
-cross-origin CORS is enabled. The Vite proxy preserves Host, including port.
-An external HTTPS proxy must preserve the original Host and scheme through a
-correctly trusted proxy chain. Do not disable these checks to work around proxy
-configuration.
+session endpoints accept the backend's own origin or exact configured frontend
+origins. Credentialed CORS permits only `RAG_ALLOWED_ORIGINS`, specified methods
+and headers. Cross-site browser session requests remain blocked. Production
+must use HTTPS custom domains under the **same registrable parent**, such as
+`app.example.com` on Vercel and `api.example.com` on the VPS. These are different
+origins but the same site, preserving the existing SameSite=Strict cookie.
+An unrelated `project.vercel.app` hostname cannot support this cookie flow with
+`api.example.com`; use the custom frontend domain for sign-in. Do not wildcard
+preview origins or weaken cookies. The existing local Vite proxy preserves Host,
+including port. HTTPS proxies must preserve Host and scheme through the trusted
+proxy chain. All frontend fetches include credentials; session secrets remain
+HttpOnly and never enter JavaScript storage.
 
 Admin safeguards prevent self-deactivation/self-demotion and removal of the
 last active admin. Deactivation preserves owned documents and history; it is
@@ -1172,13 +1190,14 @@ UI. Passing these suites does not establish live PostgreSQL, provider billing,
 model download, browser rendering, or deployment correctness.
 
 For production-build verification without updating existing TypeScript build
-state/output, run from `frontend/` on macOS/Linux:
+state/output, copy the frontend without local environment files or generated
+files. Run from `frontend/` on macOS/Linux:
 
 ```bash
 build_dir=$(mktemp -d)
-npx tsc -p tsconfig.app.json --noEmit --incremental --tsBuildInfoFile "$build_dir/app.tsbuildinfo"
-npx tsc -p tsconfig.node.json --noEmit --incremental --tsBuildInfoFile "$build_dir/node.tsbuildinfo"
-npx vite build --outDir "$build_dir/dist"
+tar --exclude=node_modules --exclude=dist --exclude=coverage --exclude='.env*' --exclude='*.tsbuildinfo' -cf - . | tar -xf - -C "$build_dir"
+ln -s "$PWD/node_modules" "$build_dir/node_modules"
+(cd "$build_dir" && VERCEL=1 VITE_API_BASE_URL=https://api.example.com VITE_CREDITS_ENABLED=false npm run build)
 ```
 
 The output stays in a separate temporary directory for review; remove it only
@@ -1286,25 +1305,458 @@ Do not add volume-removal flags. This stack's database network is external;
 preserve the separate PostgreSQL container, data volume and private bind mounts.
 Restart the host API/worker only after container equivalents have stopped.
 
+## Neon database and object storage
+
+Neon is a separate, fresh production environment. No local database, users,
+documents, conversations, original PDFs or staged uploads are imported. Ordinary
+local API/worker commands continue to use local `.env` and filesystem storage.
+The existing psycopg driver, schema, authentication and tenant/document ACLs remain.
+
+The configured project is `snowy-morning-04430062`, production branch
+`br-spring-forest-azpdlnyv`, in AWS Singapore. It already uses PostgreSQL 17;
+setup preserves that version. `neon.ts` declares two **private** buckets:
+`rag-documents` (original PDFs) and `rag-uploads` (staged PDF/TXT/MD uploads).
+The schema runner applies the existing migrations; this adapter adds no tables.
+
+### Provisioning without replacing local configuration
+
+Use these commands from the repository root after Neon browser sign-in:
+
+```bash
+neon link --org-id org-misty-darkness-64606156 --project-id snowy-morning-04430062 --branch production --no-env-pull --no-config -y
+neon config plan
+neon deploy --no-env-pull
+neon env pull --service postgres,object-storage --file .env.neon
+chmod 600 .env.neon
+```
+
+Review the plan before applying. Do not use a bare `neon init`, `neon link`,
+`neon deploy`, `neon checkout` or `neon env pull` in this repository: automatic
+environment pulls can replace the local `DATABASE_URL`. Even `init --no-link`
+can pull variables when the directory is already linked. Use the explicit
+opt-outs and output filename above. The generated `.neon`, `.env.neon*`, agent
+skills and node_modules are ignored; the example file and service config are
+reviewable. `.vercelignore` excludes credentials, private data and local caches.
+
+`.env.neon.example` documents the required values. The real `.env.neon` contains
+pooled and direct URLs plus the four AWS storage variables. It is never loaded
+by normal local startup. Keep it private: the direct URL retains owner privileges.
+Database credentials and object-storage credentials are separate.
+
+For a **new, empty** Neon database only, preview and initialize:
+
+```bash
+python -m scripts.check_neon --before-schema
+python -m scripts.run_neon --direct -- python -m scripts.setup_database
+python -m scripts.run_neon --direct -- python -m scripts.setup_database --apply
+python -m scripts.neon_runtime_role --apply
+python -m scripts.check_neon
+```
+
+The schema was tested on an expiring validation branch before production setup.
+Do not repeat fresh initialization against an existing application database;
+use approved maintenance with backups and the schema runner's `--upgrade` flag.
+Never use an import, restore or local dump unless explicitly requested.
+
+`scripts.neon_runtime_role` previews unless `--apply` is supplied. It creates
+`rag_app` using SQL with only table DML and sequence access, refuses elevated or
+unknown existing runtime credentials, and changes only `DATABASE_URL` in the
+selected Neon file. It preserves `DATABASE_URL_UNPOOLED` for maintenance. Use the
+same owner for future migrations so its default grants apply.
+
+### Running against Neon deliberately
+
+In separate terminals, with the virtual environment active:
+
+```bash
+python -m scripts.run_neon -- python -m uvicorn app.main:app --host 127.0.0.1 --port 8011
+python -m scripts.run_neon -- python -m scripts.ingestion_worker
+```
+
+The launcher requires a TLS Neon database URL, selects the separate settings
+file, uses its cloud credentials, and enables S3 mode. `--direct` selects the
+owner URL for approved operator commands; normal API/worker traffic uses pooling
+and the restricted role. It never falls back to a local database connection.
+Both processes must use the same embedding model and 384-dimensional vectors.
+Set `HF_HOME` explicitly if reusing a model cache outside the library's default
+location. Model weights remain local to each process; they are not stored in
+PostgreSQL or the document buckets.
+
+For browser use, configure the backend's exact `RAG_ALLOWED_ORIGINS` and start
+the frontend with the matching public `VITE_API_BASE_URL`. For generation, add a
+production OpenRouter key to the private cloud configuration; local provider
+credentials are not copied automatically. Existing operator commands, such as
+`scripts.set_user_password`, can be run through `scripts.run_neon --direct` to
+configure the newly created admin. Never expose the owner URL, S3 credentials or
+provider keys to the browser.
+
+### Storage behavior and remaining deployment work
+
+The existing upload APIs and responses are preserved. Uploaded filenames remain
+metadata: staged keys use server-generated UUIDs and original-PDF keys use
+document IDs. The API/worker access storage with server credentials. Every PDF
+request checks the existing SQL authorization policy **before** probing storage;
+responses stream privately with `no-store` and single-byte-range support. No
+public PDF URLs or long-lived browser storage credentials are introduced.
+
+Workers retain staged objects during transient retries and failed finalization;
+successful/terminal finalization removes staged contents. Failed-job removal
+retains its database record if object cleanup fails. Stale-job recovery checks
+the selected storage backend. Object storage and PostgreSQL are separate systems;
+an object cleanup failure can leave an orphan requiring operator review.
+
+This setup proves Neon connectivity and storage through the current API. It is
+**not a complete Vercel compute deployment**. The opt-in direct upload flow below
+bypasses the function-request body limit for new library uploads. Existing
+synchronous uploads and PDF replacement/reindex still send multipart bodies to
+FastAPI and remain subject to the hosting platform's request-size limit.
+Model packaging/memory, daemon shutdown, platform rate limits and actual
+Vercel runtime behavior also need validation before public launch. The VPS
+preflight below remains specific to the optional VPS deployment; use
+`scripts.check_neon` for Neon database/storage checks.
+
+### Direct browser uploads for hosted deployments
+
+Local uploads remain unchanged by default. To opt in for new library uploads,
+the browser requests an authenticated upload policy, posts file bytes directly
+to the private upload bucket, then confirms the upload with FastAPI. Only small
+JSON requests cross the API host. The existing multi-file queue and job polling
+continue to work. The existing 50 MiB/file and PDF page limits still apply.
+
+New authenticated writer endpoints (no schema migration):
+
+- `POST /documents/uploads/prepare`: `{filename, size, sha256}` returns
+  `{ticket, url, fields, expires_at}`. The signed POST permits exactly the
+  declared byte length at one server-generated `incoming/` key for ten minutes.
+- `POST /documents/uploads/complete`: `{ticket}` verifies current writer
+  permission, user/tenant, expiry, environment, byte count, SHA-256 and PDF magic.
+  It freezes verified input under a separate server-only `staged/` key and
+  returns the existing queued-job response with HTTP 202. Extraction and full
+  PDF validation stay in the worker. Advisory locking makes concurrent/repeated
+  completion safe; a browser policy cannot overwrite accepted worker input.
+
+Tickets and signed POST fields are temporary capabilities: keep them out of
+logs, analytics, source control and screenshots. Storage requests omit API
+bearers, session cookies and CSRF headers. Missing signing configuration fails
+closed. A storage authorization error does not sign the user out of the app.
+The client retries an ambiguous completion acknowledgement once using the same
+ticket, without uploading again or creating a second job.
+
+Production activation, after selecting a frontend domain:
+
+1. Generate a unique random server-only `RAG_UPLOAD_SIGNING_KEY` of at least
+   32 bytes using your secret manager. Set it in the API environment, alongside
+   the existing Neon/S3 configuration. Never prefix this secret with `VITE_`.
+   A key rotation invalidates uncompleted tickets. Do not edit the local `.env`.
+2. Configure the API's exact `RAG_ALLOWED_ORIGINS` for the frontend URL and check
+   bucket CORS. The helper preserves unrelated rules and previews by default:
+
+   ```bash
+   python -m scripts.configure_upload_cors --env-file .env.neon --origin https://app.example.com
+   python -m scripts.configure_upload_cors --env-file .env.neon --origin https://app.example.com --apply
+   ```
+
+   **Observed provider limitation, October 24, 2026:** the validation bucket's
+   `GetBucketCors` returns wildcard origins. `PutBucketCors` returns
+   `NoSuchBucket`, although bucket reads/writes succeed. The alternate standard
+   Content-MD5 format gives the same result. Exact-origin restrictions could not
+   be applied or verified; no production CORS change was made. The helper checks
+   readback before claiming success and warns about retained wildcard rules.
+   Resolve this with Neon before claiming an origin allowlist. CORS is separate
+   from object authorization: private objects still require valid credentials;
+   signed uploads are limited to their temporary key and byte count.
+3. Set frontend `VITE_DIRECT_UPLOADS=true` and the existing public
+   `VITE_API_BASE_URL`, then rebuild/redeploy. The switch defaults to `false`.
+   No frontend domain has been selected and production is **not enabled** yet.
+4. Test sign-in, multiple uploads, processing status, citation/PDF access and
+   forbidden-user behavior in the deployed browser. Large replacement/reindex
+   needs a separate direct-upload change before it can bypass function limits.
+
+Abandoned policies and interrupted uploads can leave `incoming/` objects.
+Preview cleanup through the explicit Neon launcher; schedule only after review:
+
+```bash
+python -m scripts.run_neon -- python -m scripts.cleanup_direct_uploads
+python -m scripts.run_neon -- python -m scripts.cleanup_direct_uploads --older-than-hours 24 --apply
+```
+
+Only expired UUID-named `incoming/` objects are selected. Accepted `staged/`
+input, original PDFs and database records are never removed by this command.
+Neon lifecycle configuration is not an enforced cleanup mechanism; this command
+is not scheduled automatically. Frozen orphans after an uncertain database
+commit require separate operator review; accepted input is retained safely.
+
+Direct-upload regression coverage lives in `tests/test_direct_uploads.py`,
+`tests/test_direct_upload_operations.py` and `frontend/src/api.test.ts`.
+The opt-in live check uses only synthetic files on an expiring validation branch:
+
+```bash
+python -m scripts.smoke_neon --env-file .env.neon-validation --direct-uploads --run
+```
+
+It checks a PDF larger than 4.5 MiB, storage size-policy enforcement, CORS
+responses, foreign-tenant denial, concurrent completion and immutable staging,
+then runs the existing real-worker/retrieval/PDF checks. Wildcard CORS is reported
+explicitly; a successful smoke run does not prove an exact-origin allowlist or
+a Vercel deployment. No paid generation or local-data import is involved.
+
+Verified October 24, 2026: **587 Python tests** and **220 frontend tests**
+passed. Root `npm run build` passed with `VERCEL=1`, a synthetic HTTPS backend
+URL and `VITE_DIRECT_UPLOADS=true` in an isolated temporary copy. The direct
+live smoke passed all checks above, including real worker processing, PDF
+round-trip/ranges, physical-page citations, tenant isolation, empty-source
+budget handling, staging cleanup and denial of unsigned original-PDF reads.
+CORS used the provider's existing wildcard response. A deployed browser and
+Vercel runtime were not tested. Local `.env` and tracked TypeScript build-state
+checksums remained unchanged; `git diff --check` passed.
+
+| Direct-upload changed files | Purpose |
+| --- | --- |
+| `app/direct_uploads.py`, `app/direct_uploads_api.py` | Signed preparation, verified/idempotent completion and writer-protected routes. |
+| `app/main.py`, `app/schemas.py`, `app/settings.py` | Router registration, typed metadata contracts and server signing configuration. |
+| `app/object_storage.py` | Separate browser incoming keys, bounded reads and incoming cleanup. |
+| `frontend/src/api.ts`, `frontend/src/api.test.ts` | Opt-in direct transport, credential separation, safe errors and completion retry coverage. |
+| `.env.example`, `.env.neon.example`, `frontend/.env.example` | Server secret and disabled-by-default frontend switch documentation. |
+| `scripts/configure_upload_cors.py`, `scripts/cleanup_direct_uploads.py` | Explicit CORS configuration and dry-run-first abandoned upload cleanup. |
+| `scripts/smoke_neon.py` | Synthetic large direct-upload and completion-race verification. |
+| `tests/test_direct_uploads.py`, `tests/test_direct_upload_operations.py` | Authorization, ticket, byte-integrity, uncertain-commit and operator-tool regressions. |
+| `README.md` | Activation, verification, provider limitation and rollback instructions. |
+
+To roll back the opt-in transport, set `VITE_DIRECT_UPLOADS=false` and redeploy
+the frontend. Keep the completion endpoint available until outstanding tickets
+expire. Existing accepted jobs remain valid for the worker. This requires no
+database rollback, data deletion or change to the local `.env`.
+
+### Verification and changed files
+
+`scripts.smoke_neon --run` starts actual API/worker processes and creates only
+synthetic fixtures on a `codex-neon-validation-*` branch. It refuses production
+fixture runs, uses cached real embeddings, and disables the provider key. To
+repeat on a separately provisioned validation branch:
+
+```bash
+python -m scripts.smoke_neon --env-file .env.neon-validation --run
+```
+
+The validation branch created October 24, 2026 expires October 26, 2026 at
+00:00 UTC. Synthetic accounts/documents remain only on that branch. Temporary
+API/worker processes are stopped after verification.
+
+Verified October 24, 2026: **554 Python tests passed**, **215 frontend tests
+passed**, and root `npm run build` passed in an isolated temporary copy. The
+live smoke run passed using real Neon PostgreSQL/pgvector, S3 uploads, a separate
+worker, actual cached embeddings, PDF round-trip/ranges, physical page citations,
+cross-tenant denial, empty-source budget settlement and staged-object cleanup.
+Unsigned PDF access was denied. No provider call was made. Final read-only
+production checks confirmed the schema, pgvector, restricted `rag_app` role and
+both private buckets. Local `.env` and tracked TypeScript build-state checksums
+match the originals. Existing AnyIO/pytest warnings remain nonblocking.
+
+Selected live command output:
+
+```text
+PASS: real FastAPI process started; Neon-backed /health returns 200
+PASS: separate worker completed both jobs using real local embeddings and Neon pgvector
+PASS: original PDF round-trip, byte ranges, no-store and cross-tenant denial
+PASS: real retrieval with physical page citations and tenant isolation
+PASS: all live Neon smoke checks; no local data imported or paid generation used
+```
+
+| Changed files | Purpose |
+| --- | --- |
+| `neon.ts`, `package.json`, `package-lock.json` | Two private buckets, Neon configuration dependencies and root build/test commands delegating to the existing frontend. |
+| `.gitignore`, `.vercelignore`, `.env.neon.example`, `.env.example` | Separate cloud configuration, secret/data exclusions and documented storage settings. |
+| `app/settings.py`, `scripts/run_neon.py` | Explicit cloud environment selection without replacing local startup. |
+| `app/object_storage.py`, `requirements.txt` | Boto3 transport with HTTPS, SigV4/path-style access, bounded reads, sanitized errors and streaming cleanup. |
+| `app/ingestion_jobs.py`, `scripts/recover_ingestion_jobs.py` | Remote staging, worker retries/finalization, failed-job cleanup and recovery. |
+| `app/original_pdfs.py`, `app/main.py` | Authorized private original storage, PDF streaming/ranges and generic storage-outage responses. |
+| `scripts/neon_runtime_role.py`, `scripts/check_neon.py` | Restricted database role setup and read-only schema/bucket readiness checks. |
+| `scripts/smoke_neon.py` | Opt-in end-to-end verification using real cloud services and synthetic fixtures. |
+| `tests/test_object_storage.py`, `tests/test_run_neon.py`, `tests/test_neon_runtime_role.py` | Storage failure/authorization, environment isolation and runtime-role regression coverage. |
+| `README.md` | Setup, startup, validation, limitations and rollback instructions. |
+
+Rollback: use the prior code and ordinary local startup with the original local
+`.env`. Keep cloud credentials separate; do not point the local database at S3
+without an explicit file migration. No local data was moved. Do not delete Neon
+databases/buckets or reset volumes as a code rollback shortcut.
+
+## Vercel API and worker deployment preparation
+
+The frontend remains the existing Vite app in a separate Vercel project. A
+second Vercel project at the **repository root** can build the FastAPI backend
+and the ingestion Daemon. There are no frontend-to-backend rewrites. Neon holds
+the existing schema and private objects; no local database is imported.
+
+This configuration is prepared, not deployed or proven on Vercel. As of October
+24, 2026, Vercel documents [large Python Functions](https://vercel.com/docs/functions/limitations)
+up to 5 GB with Fluid compute, and [Daemons](https://vercel.com/docs/daemons) for
+container-based continuous workers. These are beta features. The
+[Daemon limits](https://vercel.com/docs/daemons/limits) currently allow 1/2 GiB
+instances on Hobby with five Active CPU-hours/month; reaching the quota stops
+workers until the quota resets or the plan changes. This is a deployment path
+to evaluate, not a promise of unlimited free production hosting.
+
+### What the configuration does
+
+- Root `vercel.json` selects FastAPI in Singapore, a 2 GiB/300-second API
+  function, CPU-only PyTorch installation and build-time model packaging.
+  `pyproject.toml` explicitly selects `server:app`; `.python-version` selects
+  Python 3.12. The frontend keeps its own `frontend/vercel.json`.
+- `server.py` exports the existing application after selecting the bundled
+  models and requiring remote storage. Local `uvicorn app.main:app` is unchanged.
+- `Dockerfile.vercel-worker` builds a Linux CPU worker with the same model IDs
+  and immutable revisions. It copies only approved source, installs models at
+  build time and runs as an unprivileged user. Runtime credentials are never
+  image build arguments. Only public model IDs/revisions are consumed there.
+- The Daemon starts with **zero instances**. It cannot consume production jobs
+  until enabled deliberately. It polls every 15 seconds and receives up to 600
+  seconds to drain on termination. `SIGTERM` and `SIGINT` stop the existing
+  worker loop after current work finishes; idle/error waits stop promptly.
+- `scripts.prepare_model_bundle` serializes selected models into a new
+  `model_bundle/` directory and writes its manifest last. Release builds require
+  full Hugging Face commit revisions and reject CUDA dependencies or embedding
+  dimensions other than 384. Existing output is never overwritten.
+- Hosted entrypoints require that bundle, force offline loading and keep the
+  configured model IDs intact, including multilingual E5 query/passage behavior.
+  A missing model or revision mismatch fails instead of downloading a substitute.
+  Normal local cache/download behavior remains unchanged without the bundle flag.
+
+### Setup sequence
+
+1. Choose same-site HTTPS addresses, for example `app.example.com` for the
+   frontend and `api.example.com` for FastAPI. Two separate default
+   `*.vercel.app` project domains do not satisfy this app's strict same-site
+   browser-session policy. Keep the existing secure cookie/CSRF rules; set the
+   API's `RAG_ALLOWED_ORIGINS` to the exact frontend origin. No domain has been
+   selected yet.
+2. Import the repository as a **backend** Vercel project, Root Directory `.`.
+   Select FastAPI and use the checked-in install/build commands. Enable Fluid
+   compute and `VERCEL_SUPPORT_LARGE_FUNCTIONS=1`. Add the backend variables
+   listed in `deploy/.env.vercel.example` through Vercel's environment settings.
+   Use `UV_TORCH_BACKEND=cpu` as well as the CPU installation command. A CUDA
+   installation fails packaging rather than silently shipping a huge GPU stack.
+3. Copy only required runtime values from your private Neon configuration:
+   pooled restricted `rag_app` URL, S3 endpoint/region/credentials and bucket
+   names. **Do not import the whole `.env.neon` file**: it also contains the
+   owner maintenance URL. Add a production OpenRouter key privately. Keep
+   payments disabled, wallet enforcement off and public registration enabled.
+   The documented one-time $0.001 starter allowance remains unchanged.
+4. Set identical model IDs and full revisions for API and worker builds. The
+   example records the public revisions tested for the current MiniLM models;
+   they are not suitable substitutes if you intentionally use other models.
+   Verify the database's existing vector/model compatibility before changing
+   these settings. Re-embedding remains a separate operation requiring approval.
+5. Confirm the existing Neon schema/storage with
+   `python -m scripts.check_neon --env-file .env.neon`. Do not reinitialize an
+   existing database. Give preview deployments only isolated validation-branch
+   credentials, not production credentials.
+6. Rehearse the worker on Linux before enabling it. Start Docker Desktop
+   yourself if stopped, then build from the repository root (all arguments below
+   are public model identifiers, not secrets):
+
+   ```bash
+   docker build --platform linux/amd64 -f Dockerfile.vercel-worker -t rag-worker:validation \
+     --build-arg EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2 \
+     --build-arg RAG_EMBEDDING_REVISION=1110a243fdf4706b3f48f1d95db1a4f5529b4d41 \
+     --build-arg RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2 \
+     --build-arg RAG_RERANKER_REVISION=233902d25c440f23af6f7d6e94d2946bac0bee0a \
+     --build-arg RAG_RETRIEVAL_MODE=rerank .
+   ```
+
+   Prepare ignored `deploy/.env.vercel-validation` from the example using only
+   restricted runtime credentials for an isolated validation branch. Queue a
+   synthetic file there, then run the image once:
+
+   ```bash
+   docker run --rm --env-file deploy/.env.vercel-validation rag-worker:validation python -m scripts.hosted_worker --once
+   ```
+
+   Confirm its job, indexed chunks, original bytes and permissions on that same
+   branch. No local PostgreSQL container or data volume is needed. A Mac model
+   smoke alone does not verify the Linux image, memory budget or startup time.
+7. Deploy the API with the worker still at zero instances. Check HTTPS `/health`
+   and model startup. Daemons run only in production during the beta; preview
+   deployments and `vercel dev` cannot rehearse the Daemon. Once the image and
+   environment are verified, change `daemons.ingestion.instances.sin1` from `0`
+   to `1` and redeploy the reviewed backend configuration. Inspect worker logs
+   and job status. Never run a validation worker against production accidentally.
+8. Import the frontend as its own Vercel project, Root Directory `frontend`.
+   Set `VITE_API_BASE_URL=https://api.example.com` and
+   `VITE_CREDITS_ENABLED=false`, using your actual API URL. Keep
+   `VITE_DIRECT_UPLOADS=false` until the direct-upload activation checks above
+   pass. Set the custom domains, redeploy and verify sign-in, F5 restoration,
+   sign-out, multiple uploads, processing, citations and forbidden-user access
+   in a browser. No backend rewrite is configured.
+
+A forced kill after the shutdown grace period can still interrupt a job. Staged
+input and processing records are retained for existing stale-job recovery;
+recovery requires stopped workers and explicit operator approval. A 600-second
+grace is not a guarantee every large PDF can finish in time. API request
+durations, concurrent model memory, public-signup abuse controls and real
+Vercel execution still need validation before public launch. Large multipart
+replacement/reindex remains limited as described above.
+
+To stop the Daemon, set its instance count to zero and redeploy; do not delete
+jobs, storage objects or tables. Review any dashboard scaling override because
+it can override the checked-in instance count. Roll back application code and
+its matching model bundle together. The database schema is unchanged.
+
+### Compute verification and changed files
+
+The prepared root configuration passed Vercel's official JSON Schema. Local
+offline packaging produced **174.7 MiB** of selected embedding/reranker models;
+both successfully ran real inference from the bundle with database access
+blocked and the provider disabled. Tests also send real process termination
+signals while synthetic jobs run. No live application records were changed.
+
+The complete Python suite passed **603 tests**, the frontend suite passed
+**220 tests**, and `npm run build` passed in an isolated Vercel-mode frontend
+build. Existing pytest/AnyIO warnings remain nonblocking. `git diff --check`
+passed, and local `.env`/tracked TypeScript build-state checksums are unchanged.
+
+Docker is now available. The Linux `amd64` base image downloaded after a retry,
+but the worker build failed while downloading the 196.3 MB CPU PyTorch wheel.
+The transfer timed out again with a 120-second read timeout. The worker image
+and Vercel installation command now use that longer timeout for large downloads;
+JSON syntax and `git diff --check` pass. Linux worker/integration verification
+remains incomplete until the download succeeds. No existing containers/volumes
+were changed, and no Vercel deployment or account change was performed.
+The bundle size above excludes Python dependencies and is not the final Linux
+function/image size. Schema validation does not prove a cloud build or runtime
+succeeds.
+
+| Changed files | Purpose |
+| --- | --- |
+| `vercel.json`, `pyproject.toml`, `.python-version` | Separate root FastAPI project, explicit entrypoint/Python version, CPU build and disabled ingestion Daemon. |
+| `Dockerfile.vercel-worker`, `.dockerignore` | CPU-only, non-root worker image with immutable model artifacts and restricted build context. |
+| `scripts/prepare_model_bundle.py` | Build selected models, verify dimensions/CPU/revisions and create a completed manifest. |
+| `app/model_loading.py`, `app/hosted_runtime.py` | Optional bundle lookup, revision checks, offline hosted startup and fail-closed storage selection. |
+| `server.py`, `scripts/hosted_worker.py` | Thin hosted entrypoints reusing the existing API and worker. |
+| `scripts/ingestion_worker.py` | Graceful signal handling and interruptible idle/error waits, preserving job processing/retry behavior. |
+| `deploy/.env.vercel.example`, `.gitignore`, `.vercelignore` | Required public/secret variable references and protection for generated artifacts/private deployment files. |
+| `tests/test_hosted_models.py`, `tests/test_worker_shutdown.py` | Bundle integrity/revision behavior, packaging constraints and real process shutdown regressions. |
+| `README.md` | Vercel setup sequence, verification, limitations and rollback instructions. |
+
 ## Production release
+
+This section describes the **optional VPS deployment**. The Neon setup above is
+the current managed database/storage path; no VPS has been provisioned.
 
 ### Selected hosting and topology
 
-Use **DigitalOcean, Singapore (SGP1)**, with an Ubuntu 24.04 LTS x86-64 Droplet:
-start with **4 vCPU, 8 GiB RAM, 160 GiB SSD** for a low-traffic launch. The listed
-Basic Regular plan is **US$48/month** as checked October 22, 2026; backups,
-domain, taxes and OpenRouter usage are additional. Confirm the regional plan
-and checkout price before provisioning. This is a sizing starting point, not
-a measured throughput guarantee. API and worker each load models; monitor RAM
-and move to 16 GiB if the selected multilingual models/corpus require it.
-See [Droplet pricing](https://www.digitalocean.com/pricing/droplets) and
-[regional availability](https://docs.digitalocean.com/platform/regional-availability/).
+Use **Vercel for the React/Vite frontend** and an **Ubuntu 24.04 LTS VPS for the
+backend**. No Next.js migration is included. A starting VPS size for a low-traffic
+launch is 4 vCPU, 8 GiB RAM and adequate SSD capacity for documents, vectors and
+models; this is not a measured throughput guarantee. API and worker each load
+models, so monitor RAM and increase capacity if needed. The VPS provider and
+actual domains remain operator choices; no server or paid service is provisioned
+by this patch.
 
 `deploy/production.compose.yaml` is separate from the Mac rehearsal and root
 database Compose files. **Run it only on the new remote host.** It runs:
 
 - Caddy on public TCP 80/443, with automatic HTTPS and persistent certificate state.
-- Nginx serving the existing React/Vite build and proxying `/api`; Credits is disabled.
+- Nginx forwarding backend paths unchanged to FastAPI; the frontend is on Vercel.
 - One FastAPI process and one ingestion worker, both running as UID/GID 10001.
 - PostgreSQL 17/pgvector on a private Docker network, with a named data volume.
 - Separate database owner/migration credentials and a restricted `rag_app` runtime role.
@@ -1325,16 +1777,17 @@ container log rotation is configured. TLS behavior follows
 forwarded identities follow [Caddy's proxy rules](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy)
 and [Uvicorn's trusted-proxy settings](https://uvicorn.dev/settings/).
 
-This is one server, not a highly available deployment. The current frontend is
-still Vite; the interrupted Next.js migration is not part of this release.
+The browser calls `https://api.example.com` directly using the public build-time
+`VITE_API_BASE_URL`; there is no Vercel/API rewrite. The existing local development
+proxy is unchanged. This backend remains one server without high availability.
 
 ### Remote preparation
 
-1. Provision the Droplet using an SSH key. Configure a DigitalOcean Cloud Firewall:
+1. Provision the VPS using an SSH key. Configure its provider/host firewall:
    allow TCP 22 only from your administration IP and TCP 80/443 publicly. Do not
    open PostgreSQL, FastAPI or rehearsal ports. Install Docker Engine and its
    Compose plugin using the [official Ubuntu instructions](https://docs.docker.com/engine/install/ubuntu/).
-2. Point an `A` record for your chosen hostname to the Droplet. Add `AAAA` only
+2. Point an `A` record for the API hostname (e.g. `api.example.com`) to the VPS. Add `AAAA` only
    if IPv6 is configured. Use direct DNS initially. Caddy needs public DNS and
    access to ports 80/443 for certificates. No domain/server has been provisioned
    by the code changes.
@@ -1347,7 +1800,9 @@ still Vite; the interrupted Next.js migration is not part of this release.
    chmod 600 deploy/.env.production
    ```
 
-4. Edit that **remote, ignored** environment file privately. Set the hostname,
+4. Edit that **remote, ignored** environment file privately. Set `RAG_PUBLIC_HOST`
+   to the API hostname without scheme/path, and `RAG_ALLOWED_ORIGINS` to the
+   exact frontend origin, e.g. `https://app.example.com`. Also set the
    ACME email, release tag, independent owner/runtime DB passwords and their
    URL-encoded connection URLs, and a dedicated OpenRouter key with an operator
    spending limit. Copy the actual embedding/reranker configuration used for
@@ -1388,24 +1843,21 @@ preserve UUID/document filenames and set ownership 10001:10001, directories
 processing jobs using the existing dry-run recovery workflow; do not blindly
 requeue claims or run both the Mac and production worker on one database.
 
-For a deliberately **empty** installation only, run the existing migrations in
-the fresh-install order above, using the maintenance image with owner credentials:
-
-```bash
-# Example invocation for each module in the documented fresh-install sequence:
-rag_compose --profile maintenance run --rm -T migrate python -m scripts.init_db
-# Continue with migrate_security, migrate_accounts, and the remaining modules.
-```
-
-For an imported, already migrated database, the only new migration is:
+Preview the migration plan using the maintenance image with owner credentials:
 
 ```bash
 rag_compose --profile maintenance run --rm -T migrate
+# Approved empty installation only:
+rag_compose --profile maintenance run --rm -T migrate python -m scripts.setup_database --apply
+# Approved imported/existing installation, after backup:
+rag_compose --profile maintenance run --rm -T migrate python -m scripts.setup_database --apply --upgrade
 ```
 
-This creates `user_starter_allowances` without backfilling or funding existing
-accounts. Run it **before starting this release**: missing accounting storage
-fails closed. It has been prepared, not applied by this change. The database
+The single runner uses the existing migration order and separate transactions
+documented above. It never seeds or resets data, and no new schema is introduced
+by this deployment update. The earlier starter-allowance migration must be present
+before startup: missing accounting storage fails closed. These commands have
+been prepared, not run against your database. The database
 initialization script installs pgvector, a non-owner runtime role and default
 grants for tables/sequences created by `rag_owner`. After restoring, confirm
 runtime grants before traffic; foreign ownership/ACLs from an old dump must not
@@ -1416,9 +1868,9 @@ retroactively changed by mounting the initialization script on an existing volum
 
 ```bash
 rag_compose run --rm -T api python -m scripts.check_production
-rag_compose up -d api worker web caddy
+rag_compose up -d api worker gateway caddy
 rag_compose ps
-python3 -m scripts.smoke_deployment --url https://YOUR_HOSTNAME
+python3 -m scripts.smoke_deployment --url https://api.example.com --api-only
 ```
 
 The preflight performs read-only schema/role/storage/configuration checks and
@@ -1432,6 +1884,38 @@ Verify the starter allowance against reported usage and unknown-cost holds; no
 live paid calls are made by automated tests. Public signup has no email proof,
 password-recovery delivery or CAPTCHA, and unlimited uploads require disk/queue
 monitoring. Resolve those operational limits before widening access.
+
+### Vercel frontend setup
+
+1. Import the reviewed Git repository into Vercel. Set **Root Directory** to
+   `frontend`, framework to **Vite**, install command to `npm ci`, build command
+   to `npm run build`, output directory to `dist`, and Node.js to 22.x.
+2. Set the following **public build variables** in the production environment:
+
+   ```dotenv
+   VITE_API_BASE_URL=https://api.example.com
+   VITE_CREDITS_ENABLED=false
+   ```
+
+   Never add OpenRouter keys, database URLs, API keys or session secrets to
+   Vercel frontend variables. These values are bundled into browser JavaScript.
+   Redeploy after changing them. A Vercel build refuses a missing/non-HTTPS
+   backend URL instead of silently shipping the local proxy fallback.
+3. Add `app.example.com` as the frontend custom domain using the DNS records
+   shown in the Vercel dashboard. The API remains `api.example.com` on the VPS.
+   Match the backend's `RAG_ALLOWED_ORIGINS` exactly, including the scheme.
+4. Deploy. `frontend/vercel.json` enables `cleanUrls`; the build generates public
+   HTML shells for each application path and a 404 page from one shared route
+   list. `/documents`, `/login` and other direct links therefore work without
+   rewrite rules. These shells contain no protected data; backend authorization
+   and existing frontend route guards still apply. See
+   [Vercel's cleanUrls configuration](https://vercel.com/docs/project-configuration/vercel-json#cleanurls).
+5. On the **custom domain**, test direct links and F5 on `/documents`, password
+   sign-in/session restore/sign-out, Back/Forward, uploads and PDF viewing.
+   Check desktop/mobile layouts and the browser Network panel for direct HTTPS
+   API calls, successful preflights, and no requests to Vercel's `/api` path.
+   Default preview domains are not configured for password sessions; do not
+   add a wildcard allowlist to enable them.
 
 ### Backups, monitoring and rollback
 
@@ -1455,14 +1939,44 @@ provider spend and unknown-cost reservations. Configure external uptime checks
 and real alert recipients before launch. No backup schedule or alerts are created
 by this patch.
 
-Rollback uses the prior matching API/worker/web image tags after pausing writes.
+Rollback uses the prior matching API/worker image tag and prior Vercel deployment
+after pausing writes. Restore matching origin settings when rolling back domains.
 Keep the additive allowance table; never drop ledgers or reset volumes. Before
 rolling back to a version that lacks starter enforcement, turn off public
 registration and generation at the gateway, since that version can bypass trial
 limits. Restore data only through a reviewed recovery operation. Never use
 `docker compose down -v` as a release or rollback command.
 
-### Release change inventory and validation
+### Deployment update inventory and validation
+
+| Changed files | Purpose |
+| --- | --- |
+| `frontend/src/apiConfig.ts`, `frontend/src/api.ts` | Validated public backend URL for every JSON, upload and PDF request; credentials included for direct cookie transport. |
+| `frontend/.env.example` | Documents the public backend URL and disabled Credits switch. |
+| `frontend/src/page-routes.json`, `frontend/src/navigation.ts` | Shared application URL list for navigation and generated static pages. |
+| `frontend/scripts/prepare-static-routes.mjs`, `frontend/package.json`, `frontend/vercel.json` | Build public route shells and a 404 page; enable Vercel clean URLs without rewrite rules; reject unsafe/missing Vercel backend URL. |
+| `frontend/src/api.test.ts`, `frontend/scripts/prepare-static-routes.test.mjs` | Direct JSON/upload/PDF transport, invalid URL rejection, static deep links and path validation. |
+| `app/browser_auth.py`, `app/main.py`, `app/settings.py`, `.env.example` | Exact-origin credentialed CORS and trusted same-site browser checks; retain CSRF headers and Secure/HttpOnly/SameSite=Strict cookies. |
+| `scripts/setup_database.py`, `tests/test_setup_database.py` | One offline-preview-first schema runner with explicit apply/upgrade flags, concurrency lock, ordered existing migrations and mocked failure coverage. |
+| `deploy/production.compose.yaml`, `deploy/nginx.production.conf`, `deploy/Caddyfile`, `deploy/.env.production.example` | Backend-only VPS stack, unchanged API paths, HTTPS API host and explicit frontend origin; maintenance defaults to preview. |
+| `deploy/Dockerfile.web` | Keeps the optional existing frontend rehearsal image compatible with the new build and public backend variable. |
+| `scripts/check_production.py`, `tests/test_production_preflight.py` | Require valid HTTPS frontend origins alongside existing read-only runtime checks. |
+| `scripts/smoke_deployment.py`, `tests/test_deployment_smoke.py` | Add direct-API smoke mode while retaining the localhost rehearsal checks. |
+| `tests/test_browser_auth.py` | Preflight, direct login/restore/logout, cookie protection, unauthorized origins, CSRF, tenant identity and bearer precedence. |
+| `README.md` | Vercel/VPS setup, one schema command, DNS/origin requirements, validation and rollback. |
+
+Deployment preparation verified on October 22, 2026: **529 Python tests passed**
+with live DB access blocked and startup model loading disabled; **215 frontend
+tests passed**. The full `npm run build` passed in Vercel mode in an isolated
+temporary copy. Generated route files match the public shell and the bundle uses
+the configured direct backend URL; missing/unsafe Vercel configuration fails.
+Production Compose validates using synthetic credentials, and `git diff --check`
+passes. No dependencies were added and tracked TypeScript build-state files are
+unchanged. Docker is stopped, so container builds/startup, live migration/grants,
+DNS/TLS, browser CORS/cookie behavior and restore remain unverified. No deployment,
+live database mutation, real `.env` edit or application-data changes were made.
+
+### Earlier application release changes
 
 | Files | Purpose |
 | --- | --- |
@@ -1486,7 +2000,7 @@ limits. Restore data only through a reviewed recovery operation. Never use
 | `tests/test_browser_auth.py`, `tests/test_credit_budgets.py`, `tests/test_credits.py` | Updated mock fixtures for the shared throttle and existing users without signup policies. |
 | `.gitignore`, `README.md` | Ignore remote secrets; document configuration, migration, cutover, backups and rollback. |
 
-Validation on October 22, 2026: **501 Python tests passed**, with live DB access
+The earlier application release was validated on October 22, 2026: **501 Python tests passed**, with live DB access
 blocked and startup model loading disabled; **205 frontend tests passed**;
 `npm run build` passed in an isolated copy under `/private/tmp`, preserving
 tracked TypeScript build-state files. Production Compose parsed with synthetic

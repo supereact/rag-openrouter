@@ -1,7 +1,8 @@
 import { useEffect, useState, type MouseEvent } from 'react'
 import { creditsEnabled } from './features'
+import pageRoutes from './page-routes.json'
 
-export const routes = ['/assistant', '/documents', '/dashboard', '/users', '/knowledge-bases', '/audit-log', '/credits', '/support', '/account'] as const
+export const routes = pageRoutes.workspace
 export function returnDestination(value: string | null): string {
   if (!value || !value.startsWith('/') || value.startsWith('//')) return '/assistant'
   const url = new URL(value, window.location.origin)

@@ -34,3 +34,18 @@ frontend/.env*
 deploy/.env.deploy
 deploy/.env.production
 .model_cache/
+.neon
+node_modules/
+
+# Neon production credentials and locally installed agent guidance
+.env.neon*
+!.env.neon.example
+.env.local
+.agents/skills/
+skills-lock.json
+
+# Generated deployment output; models are built from selected public IDs.
+model_bundle/
+.vercel/
+deploy/.env.vercel*
+!deploy/.env.vercel.example

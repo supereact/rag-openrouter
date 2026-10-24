@@ -1,4 +1,4 @@
-"""Smoke-test localhost Docker rehearsal via Nginx; no API credentials needed."""
+"""Smoke-test the rehearsal web proxy or direct VPS API without credentials."""
 from __future__ import annotations
 
 import argparse
@@ -17,9 +17,12 @@ def probe(url: str, *, expected: int, timeout: float = 10.0) -> int:
         return exc.code
 
 
-def run(base: str) -> bool:
+def run(base: str, *, api_only: bool = False) -> bool:
     base = base.rstrip("/")
     checks = (
+        ("Database readiness", f"{base}/health", 200),
+        ("Authentication required", f"{base}/documents", 401),
+    ) if api_only else (
         ("Web UI", f"{base}/", 200),
         ("Database readiness", f"{base}/api/health", 200),
         ("Authentication required", f"{base}/api/documents", 401),
@@ -40,5 +43,6 @@ def run(base: str) -> bool:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:8080")
+    parser.add_argument('--api-only', action='store_true', help='Check a direct VPS API origin without a frontend proxy.')
     arguments = parser.parse_args()
-    sys.exit(0 if run(arguments.url) else 1)
+    sys.exit(0 if run(arguments.url, api_only=arguments.api_only) else 1)

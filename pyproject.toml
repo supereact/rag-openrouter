@@ -1,0 +1,3 @@
+# Existing requirements.txt remains the dependency source of truth.
+[tool.vercel]
+entrypoint = "server:app"

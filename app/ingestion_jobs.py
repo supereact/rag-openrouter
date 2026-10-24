@@ -17,6 +17,7 @@ from app.db import db_connection
 from app.file_ingestion import ALLOWED_EXTENSIONS, MAX_FILE_BYTES, extract_document, extract_pdf_pages
 from app.security import Principal
 from app.original_pdfs import store_pdf
+from app import object_storage
 
 logger = logging.getLogger('rag.ingestion')
 MAX_ATTEMPTS = 3
@@ -49,6 +50,13 @@ def queue_upload(name: str, data: bytes, principal: Principal) -> dict:
     if len(data) > MAX_FILE_BYTES:
         raise ValueError('File exceeds the upload size limit')
     job_id = uuid4()
+    if object_storage.enabled():
+        object_storage.put_upload(job_id, data)
+        try:
+            return _insert_job(job_id, title, principal)
+        except BaseException:
+            object_storage.remove_upload(job_id)
+            raise
     SPOOL_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     # Only the current user should access unprocessed local documents.
     if SPOOL_DIR.is_symlink():
@@ -58,18 +66,27 @@ def queue_upload(name: str, data: bytes, principal: Principal) -> dict:
     try:
         with os.fdopen(fd, 'wb') as fp:
             fp.write(data)
-        with db_connection() as conn:
-            row = conn.execute(
-                '''INSERT INTO ingestion_jobs
-                   (id, tenant_id, user_id, filename, status)
-                   VALUES (%s, %s, %s, %s, 'queued')
-                   RETURNING id, filename, status, created_at''',
-                (job_id, principal.tenant_id, principal.user_id, title),
-            ).fetchone()
-        return dict(id=str(row[0]), filename=row[1], status=row[2], created_at=row[3])
+        return _insert_job(job_id, title, principal)
     except BaseException:
         path.unlink(missing_ok=True)
         raise
+
+
+def _insert_job(job_id: UUID, title: str, principal: Principal) -> dict:
+    with db_connection() as conn:
+        row = conn.execute('''INSERT INTO ingestion_jobs
+            (id, tenant_id, user_id, filename, status)
+            VALUES (%s, %s, %s, %s, 'queued')
+            RETURNING id, filename, status, created_at''',
+            (job_id, principal.tenant_id, principal.user_id, title)).fetchone()
+    return dict(id=str(row[0]), filename=row[1], status=row[2], created_at=row[3])
+
+
+def remove_staged(job_id: UUID) -> None:
+    if object_storage.enabled():
+        object_storage.remove_upload(job_id)
+    else:
+        spool_path(job_id).unlink(missing_ok=True)
 
 
 def _job_dict(row) -> dict:
@@ -121,7 +138,7 @@ def remove_failed_job(principal: Principal, job_id: UUID) -> None:
             raise ValueError('Only failed uploads can be removed')
         # Unlink first: a cleanup failure rolls back and retains the job record.
         # Workers may already have removed staged input after terminal failure.
-        spool_path(job_id).unlink(missing_ok=True)
+        remove_staged(job_id)
         conn.execute('DELETE FROM ingestion_jobs WHERE id=%s', (job_id,))
 
 
@@ -195,8 +212,11 @@ def process_one_job() -> bool:
     try:
         if principal is None or principal.role not in ('admin', 'editor'):
             raise PermissionError('Upload owner is inactive or no longer permitted to ingest documents')
-        with path.open('rb') as stream:
-            data = stream.read(MAX_FILE_BYTES + 1)
+        if object_storage.enabled():
+            data = object_storage.read_upload(job_id)
+        else:
+            with path.open('rb') as stream:
+                data = stream.read(MAX_FILE_BYTES + 1)
         if title.lower().endswith('.pdf'):
             from app.services import ingest_pdf_pages
             pages = extract_pdf_pages(title, data)
@@ -250,7 +270,7 @@ def process_one_job() -> bool:
         heart.join(timeout=1)
         if finalized:
             # Success or terminal failure: remove staged document contents.
-            path.unlink(missing_ok=True)
+            remove_staged(job_id)
     return True
 
 

@@ -13,5 +13,5 @@
         Permissions-Policy "camera=(), microphone=(), geolocation=()"
         -Server
     }
-    reverse_proxy web:80
+    reverse_proxy gateway:80
 }

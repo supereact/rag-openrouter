@@ -8,21 +8,25 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import date
 from typing import Literal
+from urllib.parse import quote
 
 import psycopg
 from fastapi import FastAPI, HTTPException, File, UploadFile, Depends, Response, Request, Query
 from fastapi.security import HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from app.db import db_connection
 from app import browser_auth
+from app import object_storage
 from app import audit_log
 from app import credit_wallets
 from app.conversation_context import ConversationContext
 from app.credits_api import router as credits_router
 from app.support_api import router as support_router
 from app.account_security_api import router as account_security_router
+from app.direct_uploads_api import router as direct_uploads_router
 from app.ingestion_jobs import queue_upload, list_jobs, get_job, job_health, remove_failed_job
 from app.document_library import list_library
 from app.model_warmup import warmup_local_models
@@ -61,9 +65,16 @@ app = FastAPI(
 
 
 _http_logger = logging.getLogger("rag.http")
+app.add_middleware(CORSMiddleware, **browser_auth.cors_options())
 app.include_router(credits_router)
 app.include_router(support_router)
 app.include_router(account_security_router)
+app.include_router(direct_uploads_router)
+
+
+@app.exception_handler(object_storage.StorageUnavailable)
+def storage_unavailable(_request: Request, _exc: object_storage.StorageUnavailable):
+    return JSONResponse(status_code=503, content={'detail': 'Private document storage is temporarily unavailable'})
 
 
 @app.middleware("http")
@@ -331,12 +342,28 @@ def delete_failed_upload(job_id: UUID, principal: Principal = Depends(require_ed
 
 
 @app.get("/documents/{document_id}/original-pdf")
-def get_original_pdf(document_id: int, principal: Principal = Depends(require_principal)):
+def get_original_pdf(document_id: int, request: Request, principal: Principal = Depends(require_principal)):
     """Authenticated PDF bytes; no public filesystem/static route or API keys in URLs."""
     result = authorized_pdf(principal, document_id)
     if result is None:
         raise HTTPException(status_code=404, detail="PDF unavailable")
     path, title = result
+    if isinstance(path, object_storage.RemotePDF):
+        try:
+            remote = object_storage.open_pdf(path, request.headers.get('range'))
+        except FileNotFoundError:
+            raise HTTPException(404, 'PDF unavailable') from None
+        except object_storage.InvalidRange:
+            raise HTTPException(416, 'Requested PDF range is unavailable',
+                                headers={'Content-Range': f'bytes */{path.size}'}) from None
+        headers = {'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff',
+                   'Content-Disposition': "inline; filename*=utf-8''" + quote(title, safe=''),
+                   'Content-Length': str(remote['ContentLength']), 'Accept-Ranges': 'bytes'}
+        if remote.get('ContentRange'):
+            headers['Content-Range'] = remote['ContentRange']
+        return StreamingResponse(object_storage.chunks(remote['Body']),
+            status_code=206 if remote.get('ContentRange') else 200,
+            media_type='application/pdf', headers=headers)
     return FileResponse(
         path, media_type="application/pdf", filename=title,
         content_disposition_type="inline",

@@ -3,6 +3,7 @@ import type { DocumentLibrary, AuditLog } from './types'
 import type { CreditSummary, CreditHistory, CreditOrder, CreditTransaction } from './types'
 import type { SupportChat, SupportChatList, SupportMessage, SupportMessages } from './types'
 import type { AccountSessions, AccountAction } from './types'
+import { apiEndpoint } from './apiConfig'
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -12,7 +13,8 @@ export class ApiError extends Error {
 }
 
 async function request<T>(key: string, path: string, init: RequestInit = {}): Promise<T> {
-  // Same-origin Vite proxy: the browser never sends the key to another host.
+  const url = apiEndpoint(path)
+  // The destination comes only from trusted build-time configuration.
   const headers = new Headers(init.headers)
   // An empty key selects the server-validated HttpOnly browser session.
   if (key) headers.set('Authorization', `Bearer ${key}`)
@@ -22,9 +24,9 @@ async function request<T>(key: string, path: string, init: RequestInit = {}): Pr
   }
   let response: Response
   try {
-    response = await fetch(`/api${path}`, { ...init, headers, credentials: 'same-origin', cache: 'no-store' })
+    response = await fetch(url, { ...init, headers, credentials: 'include', cache: 'no-store' })
   } catch {
-    throw new ApiError(0, 'Cannot reach the API. Check that FastAPI is running on port 8000.')
+    throw new ApiError(0, 'Cannot reach the API. Check the backend URL and network connection.')
   }
   if (!response.ok) {
     let detail = `Request failed (HTTP ${response.status})`
@@ -43,11 +45,12 @@ async function request<T>(key: string, path: string, init: RequestInit = {}): Pr
 
 
 async function publicPost<T>(path: string, body: unknown): Promise<T> {
+  const url = apiEndpoint(path)
   let response: Response
   try {
-    response = await fetch(`/api${path}`, {
+    response = await fetch(url, {
       method: 'POST', headers: {'Content-Type': 'application/json', 'X-RAG-CSRF': '1'},
-      body: JSON.stringify(body), credentials: 'same-origin', cache: 'no-store',
+      body: JSON.stringify(body), credentials: 'include', cache: 'no-store',
     })
   } catch { throw new ApiError(0, 'Cannot reach FastAPI') }
   if (!response.ok) {
@@ -55,6 +58,48 @@ async function publicPost<T>(path: string, body: unknown): Promise<T> {
     throw new ApiError(response.status, typeof payload?.detail === 'string' ? payload.detail : `Request failed (${response.status})`)
   }
   return await response.json() as T
+}
+
+async function uploadDirect(key: string, file: File): Promise<EnqueuedJob> {
+  if (!globalThis.crypto?.subtle) {
+    throw new ApiError(0, 'Direct uploads require a secure browser connection.')
+  }
+  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
+  const sha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+  const target = await request<{ticket: string; url: string; fields: Record<string, string>}>(
+    key, '/documents/uploads/prepare', {method: 'POST', body: JSON.stringify({filename: file.name, size: file.size, sha256})})
+  try {
+    const url = new URL(target.url)
+    if (url.protocol !== 'https:' || url.username || url.password || url.hash) throw new Error()
+  } catch {
+    throw new ApiError(502, 'The upload destination is unavailable.')
+  }
+  const form = new FormData()
+  for (const [name, value] of Object.entries(target.fields)) form.append(name, value)
+  form.append('file', file, file.name)
+  let response: Response
+  try {
+    // This request carries only the scoped upload policy, never API/session
+    // credentials. Let the browser supply the multipart boundary.
+    response = await fetch(target.url, {method: 'POST', body: form, credentials: 'omit',
+      redirect: 'error', referrerPolicy: 'no-referrer', cache: 'no-store'})
+  } catch {
+    throw new ApiError(0, 'Could not upload the file to private storage. Retry this file.')
+  }
+  if (!response.ok) {
+    // Storage 401/403 is not an expired application session. Do not sign out or
+    // display XML error bodies that may contain signed request details.
+    throw new ApiError(502, 'Private storage rejected this upload. Retry this file.')
+  }
+  const finish = () => request<EnqueuedJob>(key, '/documents/uploads/complete',
+    {method: 'POST', body: JSON.stringify({ticket: target.ticket})})
+  try {
+    return await finish()
+  } catch (error) {
+    // Retry ambiguous acknowledgement once with the same ticket/job identifier.
+    if (error instanceof ApiError && (error.status === 0 || error.status === 503)) return finish()
+    throw error
+  }
 }
 
 export const api = {
@@ -168,6 +213,7 @@ export const api = {
     return request<IngestResponse>(key, '/documents/upload', { method: 'POST', body })
   },
   uploadQueued: (key: string, file: File) => {
+    if (import.meta.env.VITE_DIRECT_UPLOADS === 'true') return uploadDirect(key, file)
     const body = new FormData()
     body.append('file', file)
     return request<EnqueuedJob>(key, '/documents/upload-async', { method: 'POST', body })
@@ -191,8 +237,8 @@ export const api = {
     return request<IngestResponse>(key, `/documents/${id}/reindex-pdf`, { method: 'POST', body })
   },
   pdf: async (key: string, id: number): Promise<Blob> => {
-    const response = await fetch(`/api/documents/${id}/original-pdf`, {
-      headers: key ? { Authorization: `Bearer ${key}` } : {}, credentials: 'same-origin', cache: 'no-store',
+    const response = await fetch(apiEndpoint(`/documents/${id}/original-pdf`), {
+      headers: key ? { Authorization: `Bearer ${key}` } : {}, credentials: 'include', cache: 'no-store',
     })
     if (!response.ok) throw new ApiError(response.status,
       response.status === 404 ? 'Original PDF unavailable or not authorized' :

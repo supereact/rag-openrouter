@@ -1,9 +1,133 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, api } from './api'
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs() })
+
+function directFile() {
+  vi.stubEnv('VITE_DIRECT_UPLOADS', 'true')
+  vi.stubGlobal('crypto', {subtle: {digest: vi.fn().mockResolvedValue(new Uint8Array(32).fill(0xab).buffer)}})
+  const file = new File(['test'], 'policy.md', {type: 'text/markdown'})
+  Object.defineProperty(file, 'arrayBuffer', {value: async () => new Uint8Array([116, 101, 115, 116]).buffer})
+  return file
+}
+
+function directTarget(url = 'https://br-test.storage.neon.tech/rag-uploads') {
+  return new Response(JSON.stringify({url, ticket: 'synthetic-ticket', fields: {key: 'incoming/synthetic.upload', policy: 'scoped-policy'}}))
+}
+
+describe('direct private uploads', () => {
+  it('sends only metadata to the API and the file/policy to storage without application credentials', async () => {
+    const file = directFile()
+    const fetchMock = vi.fn().mockResolvedValueOnce(directTarget())
+      .mockResolvedValueOnce(new Response(null, {status: 204}))
+      .mockResolvedValueOnce(new Response(JSON.stringify({id: 'job', status: 'queued'}), {status: 202}))
+    vi.stubGlobal('fetch', fetchMock)
+    expect(await api.uploadQueued('synthetic-api-key', file)).toEqual({id: 'job', status: 'queued'})
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      '/api/documents/uploads/prepare', 'https://br-test.storage.neon.tech/rag-uploads', '/api/documents/uploads/complete',
+    ])
+    const prepare = fetchMock.mock.calls[0][1]
+    expect(JSON.parse(prepare.body)).toEqual({filename: 'policy.md', size: 4, sha256: 'ab'.repeat(32)})
+    expect(prepare.headers.get('Authorization')).toBe('Bearer synthetic-api-key')
+    const upload = fetchMock.mock.calls[1][1]
+    expect(upload.credentials).toBe('omit')
+    expect(upload.redirect).toBe('error')
+    expect(upload.referrerPolicy).toBe('no-referrer')
+    expect(upload.headers).toBeUndefined()
+    expect([...upload.body.keys()]).toEqual(['key', 'policy', 'file'])
+    expect(upload.body.get('file').name).toBe('policy.md')
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({ticket: 'synthetic-ticket'})
+    expect(fetchMock.mock.calls[2][1].credentials).toBe('include')
+  })
+
+  it('retries an ambiguous completion using the same authorization without uploading a second file', async () => {
+    const file = directFile()
+    const fetchMock = vi.fn().mockResolvedValueOnce(directTarget())
+      .mockResolvedValueOnce(new Response(null, {status: 204}))
+      .mockRejectedValueOnce(new TypeError('network interrupted'))
+      .mockResolvedValueOnce(new Response(JSON.stringify({id: 'same-job', status: 'queued'}), {status: 202}))
+    vi.stubGlobal('fetch', fetchMock)
+    expect((await api.uploadQueued('', file)).id).toBe('same-job')
+    expect(fetchMock.mock.calls[2][0]).toBe('/api/documents/uploads/complete')
+    expect(fetchMock.mock.calls[3][1].body).toBe(fetchMock.mock.calls[2][1].body)
+    expect(fetchMock.mock.calls[3][1].headers.get('X-RAG-CSRF')).toBe('1')
+    expect(fetchMock.mock.calls.filter(([url]) => url.includes('/prepare'))).toHaveLength(1)
+  })
+
+  it('keeps storage authorization failures distinct from application sign-out and hides provider details', async () => {
+    const file = directFile()
+    const fetchMock = vi.fn().mockResolvedValueOnce(directTarget())
+      .mockResolvedValueOnce(new Response('<Error>private-signature-details</Error>', {status: 403}))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(api.uploadQueued('', file)).rejects.toMatchObject({status: 502, message: 'Private storage rejected this upload. Retry this file.'})
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('preserves application 401/403 responses from completion without retrying them', async () => {
+    const file = directFile()
+    const fetchMock = vi.fn().mockResolvedValueOnce(directTarget())
+      .mockResolvedValueOnce(new Response(null, {status: 204}))
+      .mockResolvedValueOnce(new Response(JSON.stringify({detail: 'Upload access denied'}), {status: 403}))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(api.uploadQueued('', file)).rejects.toMatchObject({status: 403})
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('rejects insecure storage destinations before sending the file', async () => {
+    const file = directFile()
+    const fetchMock = vi.fn().mockResolvedValue(directTarget('http://attacker.example/upload'))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(api.uploadQueued('', file)).rejects.toMatchObject({status: 502})
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
 
 describe('browser API client', () => {
+  it('uses the configured VPS URL for login, reads, multipart uploads and private PDFs', async () => {
+    vi.stubEnv('VITE_API_BASE_URL', 'https://api.example.com/')
+    const fetchMock = vi.fn().mockImplementation(async () => new Response('{}', {status: 200}))
+    vi.stubGlobal('fetch', fetchMock)
+    await api.browserLogin('user@example.org', 'synthetic-password')
+    await api.browserSession()
+    await api.me('synthetic-key')
+    await api.uploadQueued('', new File(['test'], 'policy.md'))
+    await api.pdf('', 17)
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      'https://api.example.com/auth/browser/login', 'https://api.example.com/auth/session',
+      'https://api.example.com/me', 'https://api.example.com/documents/upload-async',
+      'https://api.example.com/documents/17/original-pdf',
+    ])
+    for (const [, options] of fetchMock.mock.calls) {
+      expect(options.credentials).toBe('include')
+      expect(options.cache).toBe('no-store')
+    }
+    expect(new Headers(fetchMock.mock.calls[0][1].headers).get('X-RAG-CSRF')).toBe('1')
+    expect(fetchMock.mock.calls[2][1].headers.get('Authorization')).toBe('Bearer synthetic-key')
+    expect(fetchMock.mock.calls[3][1].body).toBeInstanceOf(FormData)
+    expect(fetchMock.mock.calls[3][1].headers.has('Content-Type')).toBe(false)
+  })
+
+  it.each(['http://api.example.com', '//attacker.example', 'https://user:secret@api.example.com',
+    'https://api.example.com?secret=value', 'https://api.example.com#fragment', 'not-a-url'])('rejects unsafe backend configuration before sending credentials: %s', async base => {
+    vi.stubEnv('VITE_API_BASE_URL', base)
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(api.me('synthetic-key')).rejects.toThrow('VITE_API_BASE_URL')
+    await expect(api.browserLogin('user@example.org', 'synthetic-password')).rejects.toThrow('VITE_API_BASE_URL')
+    await expect(api.pdf('synthetic-key', 17)).rejects.toThrow('VITE_API_BASE_URL')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('supports direct loopback development and a backend path prefix', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response('{}', {status: 200}))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubEnv('VITE_API_BASE_URL', 'http://127.0.0.1:8000')
+    await api.me('')
+    vi.stubEnv('VITE_API_BASE_URL', 'https://api.example.com/v1/')
+    await api.me('')
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['http://127.0.0.1:8000/me', 'https://api.example.com/v1/me'])
+  })
+
   it('uses owner-only account endpoints and keeps credentials inside request bodies', async () => {
     const fetchMock = vi.fn().mockImplementation(async () => new Response('{}', {status:200}))
     vi.stubGlobal('fetch', fetchMock)
@@ -22,7 +146,7 @@ describe('browser API client', () => {
     for (const [url, options] of fetchMock.mock.calls) {
       expect(url).not.toMatch(/old-test-password|new-test-password/)
       expect(options.headers.get('X-RAG-CSRF')).toBe('1')
-      expect(options.credentials).toBe('same-origin')
+      expect(options.credentials).toBe('include')
       expect(options.cache).toBe('no-store')
     }
   })
@@ -44,7 +168,7 @@ describe('browser API client', () => {
     for (const [, options] of fetchMock.mock.calls) {
       expect(options.headers.get('X-RAG-CSRF')).toBe('1')
       expect(options.headers.has('Authorization')).toBe(false)
-      expect(options.credentials).toBe('same-origin')
+      expect(options.credentials).toBe('include')
       expect(options.cache).toBe('no-store')
     }
   })
@@ -66,7 +190,7 @@ describe('browser API client', () => {
     for (const [, options] of fetchMock.mock.calls) {
       expect(options.headers.get('X-RAG-CSRF')).toBe('1')
       expect(options.headers.has('Authorization')).toBe(false)
-      expect(options.credentials).toBe('same-origin')
+      expect(options.credentials).toBe('include')
       expect(options.cache).toBe('no-store')
     }
   })
@@ -105,7 +229,7 @@ describe('browser API client', () => {
       '/api/documents/11/original-pdf','/api/auth/browser/register','/api/auth/browser/logout',
     ])
     for (const [,options] of fetchMock.mock.calls) {
-      expect(options.credentials).toBe('same-origin')
+      expect(options.credentials).toBe('include')
       expect(new Headers(options.headers).has('Authorization')).toBe(false)
     }
     for (const index of [0,1,2,4,5]) {

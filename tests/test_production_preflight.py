@@ -41,7 +41,7 @@ class Database:
 def configured(monkeypatch, tmp_path):
     for name, value in dict(LLM_PROVIDER='openrouter', OPENROUTER_API_KEY='synthetic-test-key',
             RAG_PAYMENTS_MODE='disabled', RAG_WALLET_ENFORCEMENT='false',
-            RAG_PUBLIC_REGISTRATION_ENABLED='true').items():
+            RAG_PUBLIC_REGISTRATION_ENABLED='true', RAG_ALLOWED_ORIGINS='https://app.example.com').items():
         monkeypatch.setattr(preflight.settings, name, value)
     for name in ('RAG_INGEST_SPOOL', 'RAG_PDF_STORAGE_DIR', 'HF_HOME'):
         path = tmp_path / name
@@ -76,6 +76,12 @@ def test_preflight_rejects_live_payments_and_inaccessible_storage(configured, mo
     problems = preflight.check()
     assert any('payments disabled' in problem for problem in problems)
     assert any('RAG_INGEST_SPOOL' in problem for problem in problems)
+
+
+@pytest.mark.parametrize('origin', ['', '*', 'http://localhost:5173', 'https://app.example.com/path'])
+def test_preflight_requires_exact_https_frontend_origins(configured, monkeypatch, origin):
+    monkeypatch.setattr(preflight.settings, 'RAG_ALLOWED_ORIGINS', origin)
+    assert any('RAG_ALLOWED_ORIGINS' in problem for problem in preflight.check())
 
 
 def test_preflight_redacts_driver_connection_errors(configured, monkeypatch, capsys):

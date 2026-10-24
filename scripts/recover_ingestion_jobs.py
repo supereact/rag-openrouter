@@ -11,6 +11,7 @@ from uuid import UUID
 
 from app.db import db_connection
 from app.ingestion_jobs import MAX_ATTEMPTS, spool_path
+from app import object_storage
 
 
 STALE_SQL = """SELECT id, attempt_count FROM ingestion_jobs
@@ -22,8 +23,12 @@ STALE_SQL = """SELECT id, attempt_count FROM ingestion_jobs
 
 def classify_stale(job_id: UUID, attempts: int) -> str:
     """No access to file contents; only existence and safe location are checked."""
-    path = spool_path(job_id)
-    if path.is_symlink() or not path.is_file():
+    if object_storage.enabled():
+        exists = object_storage.upload_exists(job_id)
+    else:
+        path = spool_path(job_id)
+        exists = not path.is_symlink() and path.is_file()
+    if not exists:
         return 'missing_input'
     if attempts >= MAX_ATTEMPTS:
         return 'exhausted'

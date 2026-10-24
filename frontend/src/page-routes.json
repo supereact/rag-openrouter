@@ -1,0 +1,4 @@
+{
+  "workspace": ["/assistant", "/documents", "/dashboard", "/users", "/knowledge-bases", "/audit-log", "/credits", "/support", "/account"],
+  "public": ["/login"]
+}

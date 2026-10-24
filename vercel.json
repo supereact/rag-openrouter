@@ -1,0 +1,24 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "fastapi",
+  "regions": ["sin1"],
+  "installCommand": "python -m pip install --timeout 120 torch --index-url https://download.pytorch.org/whl/cpu && python -m pip install --timeout 120 -r requirements.txt",
+  "buildCommand": "python -m scripts.prepare_model_bundle --require-cpu --require-revisions",
+  "functions": {
+    "server.py": {
+      "maxDuration": 300,
+      "memory": 2048,
+      "includeFiles": "model_bundle/**",
+      "excludeFiles": "{frontend/**,tests/**,evaluation/**,sample_docs/**,backups/**,deploy/**,scripts/**,.agents/**,node_modules/**,Dockerfile*}"
+    }
+  },
+  "daemons": {
+    "ingestion": {
+      "root": ".",
+      "entrypoint": "Dockerfile.vercel-worker",
+      "instances": {"sin1": 0},
+      "resources": {"requests": {"memory": "2Gi"}},
+      "terminationGracePeriodSeconds": 600
+    }
+  }
+}

@@ -118,6 +118,25 @@ class EnqueuedJob(BaseModel):
     created_at: datetime
 
 
+class DirectUploadRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
+    filename: str = Field(min_length=1, max_length=255)
+    size: int = Field(strict=True, ge=1, le=50 * 1024 * 1024)
+    sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+
+
+class DirectUploadTarget(BaseModel):
+    ticket: str
+    url: str
+    fields: dict[str, str]
+    expires_at: int
+
+
+class DirectUploadCompletion(BaseModel):
+    model_config = {'extra': 'forbid'}
+    ticket: str = Field(min_length=1, max_length=4096)
+
+
 class IngestionJob(BaseModel):
     id: UUID
     filename: str

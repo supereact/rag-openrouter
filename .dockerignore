@@ -2,6 +2,7 @@
 # Secrets, private PDFs, staging uploads, model cache and .git stay out.
 **
 !requirements.txt
+!Dockerfile.vercel-worker
 !app/
 !app/**
 !scripts/

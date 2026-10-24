@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 
 from app import settings
+from app.browser_auth import allowed_origins
 from app.db import db_connection
 
 REQUIRED_TABLES = {
@@ -24,6 +25,12 @@ def check() -> list[str]:
         problems.append('This release requires payments disabled and prepaid enforcement off.')
     if settings.RAG_PUBLIC_REGISTRATION_ENABLED != 'true':
         problems.append('This release requires public registration enabled.')
+    try:
+        origins = allowed_origins()
+        if not origins or any(not origin.startswith('https://') for origin in origins):
+            problems.append('Configure exact HTTPS frontend origins in RAG_ALLOWED_ORIGINS.')
+    except ValueError:
+        problems.append('RAG_ALLOWED_ORIGINS contains an invalid origin.')
     for name in ('RAG_INGEST_SPOOL', 'RAG_PDF_STORAGE_DIR', 'HF_HOME'):
         value = os.getenv(name, '')
         path = Path(value)

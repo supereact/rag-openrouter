@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from app.db import db_connection
 from app.security import Principal
+from app import object_storage
 
 PDF_DIR = Path(os.getenv(
     'RAG_PDF_STORAGE_DIR',
@@ -29,6 +30,9 @@ def store_pdf(document_id: int, data: bytes) -> None:
     """Atomically replace original file, restricted to the server's user."""
     if not data.startswith(b'%PDF-'):
         raise ValueError('Uploaded bytes are not a PDF')
+    if object_storage.enabled():
+        object_storage.put_pdf(document_id, data)
+        return
     if PDF_DIR.is_symlink():
         raise RuntimeError('PDF storage directory must not be a symlink')
     PDF_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -46,10 +50,13 @@ def store_pdf(document_id: int, data: bytes) -> None:
 
 
 def remove_pdf(document_id: int) -> None:
+    if object_storage.enabled():
+        object_storage.remove_pdf(document_id)
+        return
     _pdf_path(document_id).unlink(missing_ok=True)
 
 
-def authorized_pdf(principal: Principal, document_id: int) -> tuple[Path, str] | None:
+def authorized_pdf(principal: Principal, document_id: int) -> tuple[Path | object_storage.RemotePDF, str] | None:
     """Return the original PDF for an authorized user only; else None.
 
     The SQL policy intentionally matches vector and full-text search access rules.
@@ -65,6 +72,9 @@ def authorized_pdf(principal: Principal, document_id: int) -> tuple[Path, str] |
         ).fetchone()
     if not row or not row[0].lower().endswith('.pdf'):
         return None
+    if object_storage.enabled():
+        result = object_storage.find_pdf(document_id)
+        return (result, row[0]) if result else None
     path = _pdf_path(document_id)
     try:
         info = path.lstat()

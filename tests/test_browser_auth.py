@@ -4,6 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
+from fastapi.middleware.cors import CORSMiddleware
 
 from app import account_auth, browser_auth, main, security
 from app.security import key_digest
@@ -14,9 +15,100 @@ HEADERS = {'X-RAG-CSRF': '1', 'Origin': 'http://localhost:5173'}
 IDENTITY = {'user_id': 2, 'tenant_id': 7, 'role': 'editor', 'username': 'writer'}
 BODY = {'email': 'user@example.org', 'password': 'synthetic-password-123'}
 
+FRONTEND = 'https://app.example.com'
+DIRECT_HEADERS = {'X-RAG-CSRF': '1', 'Origin': FRONTEND, 'Sec-Fetch-Site': 'same-site'}
+
+
+@pytest.fixture
+def split_client(state, monkeypatch):
+    monkeypatch.setattr(browser_auth.settings, 'RAG_ALLOWED_ORIGINS', FRONTEND)
+    wrapped = CORSMiddleware(main.app, **browser_auth.cors_options())
+    with TestClient(wrapped, base_url='https://api.example.com') as client:
+        yield client
+
+
+def test_direct_frontend_preflight_login_restore_and_logout(split_client, state):
+    response = split_client.options('/auth/browser/login', headers={
+        'Origin': FRONTEND, 'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Headers': 'content-type,x-rag-csrf'})
+    assert response.status_code == 200
+    assert response.headers['access-control-allow-origin'] == FRONTEND
+    assert response.headers['access-control-allow-credentials'] == 'true'
+    assert 'Origin' in response.headers['vary']
+    assert not state['calls']
+    response = split_client.post('/auth/browser/login', json=BODY, headers=DIRECT_HEADERS)
+    assert response.status_code == 200
+    cookie = response.headers['set-cookie']
+    assert 'Secure' in cookie and 'HttpOnly' in cookie and 'SameSite=strict' in cookie
+    assert 'Domain=' not in cookie
+    assert TOKEN not in response.text
+    response = split_client.get('/auth/session', headers=DIRECT_HEADERS)
+    assert response.json() == IDENTITY
+    assert response.headers['access-control-allow-origin'] == FRONTEND
+    assert response.headers['cache-control'] == 'no-store'
+    assert split_client.post('/auth/browser/logout', headers=DIRECT_HEADERS).status_code == 204
+    assert state['revoked']
+
+
+@pytest.mark.parametrize('origin', ['https://evil.example.com', 'https://app.example.com.attacker.test', 'null'])
+def test_unlisted_siblings_and_spoofed_origins_cannot_read_or_write(split_client, state, origin):
+    response = split_client.options('/auth/browser/login', headers={
+        'Origin': origin, 'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Headers': 'content-type,x-rag-csrf'})
+    assert response.status_code == 400
+    assert 'access-control-allow-origin' not in response.headers
+    response = split_client.post('/auth/browser/login', json=BODY,
+        headers={**DIRECT_HEADERS, 'Origin': origin})
+    assert response.status_code == 403
+    account_auth.login.assert_not_called()
+    assert not state['calls']
+
+
+def test_direct_requests_keep_csrf_requirement_and_cross_site_cookie_rejection(split_client, state):
+    for headers in ({'Origin': FRONTEND, 'Sec-Fetch-Site': 'same-site'},
+                    {**DIRECT_HEADERS, 'Sec-Fetch-Site': 'cross-site'},
+                    {'X-RAG-CSRF': '1', 'Sec-Fetch-Site': 'same-site'}):
+        assert split_client.post('/auth/browser/login', json=BODY, headers=headers).status_code == 403
+    account_auth.login.assert_not_called()
+    assert not state['calls']
+
+
+def test_direct_multipart_and_bearer_auth_preserve_server_identity(split_client, state, monkeypatch):
+    split_client.post('/auth/browser/login', json=BODY, headers=DIRECT_HEADERS)
+    seen = []
+    monkeypatch.setattr(main, 'queue_upload', lambda name, data, principal:
+        (seen.append(principal) or dict(id='11111111-1111-4111-8111-111111111111', filename=name,
+                                       status='queued', created_at='2026-10-22T00:00:00Z')))
+    response = split_client.post('/documents/upload-async', files={'file': ('policy.md', b'synthetic')}, headers=DIRECT_HEADERS)
+    assert response.status_code == 202
+    assert seen[0].tenant_id == IDENTITY['tenant_id']
+    assert seen[0].role == 'editor'
+    response = split_client.get('/me', headers={'Origin': FRONTEND, 'Authorization': f'Bearer {API_KEY}'})
+    assert response.json()['tenant_id'] == 9  # Explicit bearer still overrides cookie.
+    response = split_client.get('/me', headers={'Origin': FRONTEND, 'Authorization': 'Bearer invalid'})
+    assert response.status_code == 401
+    assert response.headers['access-control-allow-origin'] == FRONTEND
+
+
+@pytest.mark.parametrize('value', ['*', 'https://*.example.com', 'https://app.example.com/path',
+    'https://user:secret@app.example.com', 'https://app.example.com?query=yes',
+    'https://app.example.com#fragment', 'http://app.example.com', 'null',
+    'https://app.example.com:99999'])
+def test_origin_configuration_rejects_unsafe_values(monkeypatch, value):
+    monkeypatch.setattr(browser_auth.settings, 'RAG_ALLOWED_ORIGINS', value)
+    with pytest.raises(ValueError, match='RAG_ALLOWED_ORIGINS'):
+        browser_auth.allowed_origins()
+
+
+def test_origin_configuration_accepts_explicit_https_and_loopback(monkeypatch):
+    monkeypatch.setattr(browser_auth.settings, 'RAG_ALLOWED_ORIGINS',
+        f'{FRONTEND}/, http://127.0.0.1:5173, {FRONTEND},http://localhost:5173')
+    assert browser_auth.allowed_origins() == [FRONTEND, 'http://127.0.0.1:5173', 'http://localhost:5173']
+
 
 @pytest.fixture
 def state(monkeypatch):
+    monkeypatch.setattr(browser_auth.settings, 'RAG_ALLOWED_ORIGINS', '')
     state = {'active': True, 'revoked': False, 'expired': False, 'role': 'editor', 'calls': []}
     class Connection:
         def execute(self, sql, args):
