@@ -150,6 +150,37 @@ def client(state):
         yield client
 
 
+@pytest.mark.parametrize('method,path', [
+    ('GET', '/me'), ('GET', '/health'), ('GET', '/openapi.json'),
+    ('POST', '/auth/login'), ('POST', '/documents/upload-async'),
+    ('DELETE', '/documents/1'), ('OPTIONS', '/auth/login'),
+])
+@pytest.mark.parametrize('headers', [
+    {'Origin': 'https://attacker.example'},
+    {'Origin': 'http://localhost:5173.attacker.example'},
+    {'Origin': 'null'},
+    {'Sec-Fetch-Site': 'cross-site'},
+    {'Origin': 'http://localhost:5173', 'Sec-Fetch-Site': 'cross-site'},
+])
+def test_cross_site_requests_rejected_before_handlers(client, state, method, path, headers):
+    response = client.request(method, path, headers={
+        **headers, 'Authorization': f'Bearer {API_KEY}'})
+    assert response.status_code == 403
+    assert response.json()['detail'] == 'Cross-site access forbidden'
+    assert 'access-control-allow-origin' not in response.headers
+    assert 'x-request-id' in response.headers
+    account_auth.login.assert_not_called()
+    assert not state['calls']
+
+
+def test_cross_site_preflight_rejected_by_actual_app(client):
+    response = client.options('/auth/login', headers={
+        'Origin': 'https://attacker.example',
+        'Access-Control-Request-Method': 'POST'})
+    assert response.status_code == 403
+    assert 'access-control-allow-origin' not in response.headers
+
+
 def test_browser_login_cookie_only_identity_and_refresh_restoration(client):
     response = client.post('/auth/browser/login', json=BODY, headers=HEADERS)
     assert response.status_code == 200

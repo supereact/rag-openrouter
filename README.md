@@ -266,7 +266,7 @@ consistent settings in API, worker, and maintenance terminals.
 | `RAG_DOCUMENTS_BUCKET`, `RAG_UPLOADS_BUCKET` | Separate private buckets, default `rag-documents` and `rag-uploads`. |
 | `AWS_ENDPOINT_URL_S3`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Server-only Neon storage variables; required in S3 mode. Explicit HTTPS endpoint, SigV4 and path-style addressing. Never expose credentials in frontend variables. |
 | `RAG_ALLOWED_ORIGINS` | Comma-separated exact frontend origins for credentialed CORS. Empty by default; production requires HTTPS, e.g. `https://app.example.com`. No wildcards. Local direct requests may use `http://localhost:5173`. |
-| `VITE_API_BASE_URL` | Public frontend **build-time** backend URL, e.g. `https://api.example.com`. HTTPS required except HTTP loopback. Blank retains the existing local `/api` proxy. Set in Vercel and rebuild after changes; never put credentials here. |
+| `VITE_API_BASE_URL` | Public frontend **build-time** backend URL. Use `/api` for the frontend Vercel proxy, or `https://api.example.com` for direct same-site access. HTTPS required except HTTP loopback. Blank retains the local `/api` default; Vercel builds require an explicit value. Rebuild after changes; never put credentials here. |
 | `VITE_CREDITS_ENABLED` | Frontend build switch; keep `false` for this release, alongside disabled backend payments. |
 | `EMBEDDING_MODEL` | Default in code: `sentence-transformers/all-MiniLM-L6-v2`, 384 dimensions. Must match every stored embedding. |
 | `RERANKER_MODEL` | Default in code: `cross-encoder/ms-marco-MiniLM-L-6-v2`. Used in rerank mode. |
@@ -421,8 +421,12 @@ CAPTCHA are not implemented; public signup does not prove ownership of an email.
 Cookie requests use `X-RAG-CSRF: 1`; cookie-authenticated writes and browser
 session endpoints accept the backend's own origin or exact configured frontend
 origins. Credentialed CORS permits only `RAG_ALLOWED_ORIGINS`, specified methods
-and headers. Cross-site browser session requests remain blocked. Production
-must use HTTPS custom domains under the **same registrable parent**, such as
+and headers. API middleware rejects every request with an untrusted `Origin`
+or `Sec-Fetch-Site: cross-site` with HTTP 403 before routing, including reads,
+preflights, and bearer-authenticated requests. Clients without browser origin
+metadata remain supported and must satisfy endpoint authentication. Origin
+checks are browser protections, not a replacement for authentication. Direct
+frontend-to-API browser access must use HTTPS custom domains under the **same registrable parent**, such as
 `app.example.com` on Vercel and `api.example.com` on the VPS. These are different
 origins but the same site, preserving the existing SameSite=Strict cookie.
 An unrelated `project.vercel.app` hostname cannot support this cookie flow with
@@ -431,6 +435,31 @@ preview origins or weaken cookies. The existing local Vite proxy preserves Host,
 including port. HTTPS proxies must preserve Host and scheme through the trusted
 proxy chain. All frontend fetches include credentials; session secrets remain
 HttpOnly and never enter JavaScript storage.
+
+### Separate Vercel project domains: same-origin API proxy
+
+For `ragproject-for-enterprise.vercel.app` and `rag-enterprise-api.vercel.app`,
+use the frontend's `/api` proxy. These project hostnames are different sites;
+allowlisting the frontend for CORS does not bypass the cross-site check or
+make `SameSite=Strict` cookies work across them.
+
+1. Deploy the checked-in `frontend/vercel.json`, which rewrites `/api/:path*`
+   to `https://rag-enterprise-api.vercel.app/:path*` and disables API caching.
+2. In the frontend Vercel project, set `VITE_API_BASE_URL=/api` and rebuild/redeploy.
+3. Keep the API's `RAG_ALLOWED_ORIGINS=https://ragproject-for-enterprise.vercel.app`
+   so the forwarded browser Origin is trusted. Redeploy the API if this changes.
+4. Sign in again. Browser requests must go to
+   `https://ragproject-for-enterprise.vercel.app/api/auth/session`, with
+   `Sec-Fetch-Site: same-origin`. Before login a 401 is expected; after login,
+   session restoration should return 200. The session cookie should be host-only
+   on the frontend domain with Secure, HttpOnly, and SameSite=Strict.
+
+This proxy option supersedes the direct-URL/no-rewrite setup in historical
+deployment notes below. Direct cross-site calls remain forbidden. For another
+API deployment, update the fixed rewrite destination before deploying. Do not
+forward to a destination selected by a browser request. To roll back, restore
+the previous frontend configuration and use custom same-site domains for direct
+API access; no database migration is involved.
 
 Admin safeguards prevent self-deactivation/self-demotion and removal of the
 last active admin. Deactivation preserves owned documents and history; it is

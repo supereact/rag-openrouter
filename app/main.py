@@ -78,6 +78,13 @@ def storage_unavailable(_request: Request, _exc: object_storage.StorageUnavailab
 
 
 @app.middleware("http")
+async def reject_cross_site_requests(request: Request, call_next):
+    if browser_auth.is_forbidden_cross_site_request(request):
+        return JSONResponse(status_code=403, content={'detail': 'Cross-site access forbidden'})
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def request_id_log(request: Request, call_next):
     """Correlate local access logs; never log URLs, query strings, or content."""
     request_id = uuid4().hex

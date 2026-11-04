@@ -42,6 +42,19 @@ def cors_options() -> dict:
                 expose_headers=['X-Request-ID'], max_age=600)
 
 
+def is_forbidden_cross_site_request(request: Request) -> bool:
+    """Reject untrusted browser traffic before handlers, including safe methods.
+
+    Origin-less clients remain supported; authentication still applies. Fetch
+    Metadata prevents cross-site navigations that do not send an Origin header.
+    """
+    origin = request.headers.get('origin')
+    expected = f'{request.url.scheme}://{request.url.netloc}'
+    return (request.headers.get('sec-fetch-site') == 'cross-site'
+            or (origin is not None
+                and origin != expected and origin not in allowed_origins()))
+
+
 def require_browser_request(request: Request) -> None:
     # Custom headers cannot be sent by cross-origin HTML forms. Only explicitly
     # configured same-site frontends may make cross-origin cookie requests.

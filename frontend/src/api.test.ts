@@ -83,6 +83,22 @@ describe('direct private uploads', () => {
 })
 
 describe('browser API client', () => {
+  it('uses the same-origin proxy for browser login and session restoration', async () => {
+    vi.stubEnv('VITE_API_BASE_URL', '/api')
+    const fetchMock = vi.fn().mockImplementation(async () => new Response('{}', {status: 200}))
+    vi.stubGlobal('fetch', fetchMock)
+    await api.browserLogin('user@example.org', 'synthetic-password')
+    await api.browserSession()
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      '/api/auth/browser/login', '/api/auth/session',
+    ])
+    for (const [, options] of fetchMock.mock.calls) {
+      expect(options.credentials).toBe('include')
+      expect(options.cache).toBe('no-store')
+      expect(new Headers(options.headers).get('X-RAG-CSRF')).toBe('1')
+    }
+  })
+
   it('uses the configured VPS URL for login, reads, multipart uploads and private PDFs', async () => {
     vi.stubEnv('VITE_API_BASE_URL', 'https://api.example.com/')
     const fetchMock = vi.fn().mockImplementation(async () => new Response('{}', {status: 200}))

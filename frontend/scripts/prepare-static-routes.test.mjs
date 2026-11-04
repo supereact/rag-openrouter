@@ -3,7 +3,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { prepareStaticRoutes } from './prepare-static-routes.mjs'
+import { prepareStaticRoutes, validateVercelApiBase } from './prepare-static-routes.mjs'
 
 const directories = []
 afterEach(async () => {
@@ -17,7 +17,16 @@ async function output() {
   return pathToFileURL(directory + sep)
 }
 
-describe('Vercel static page URLs without rewrites', () => {
+describe('Vercel static page URLs and API proxy', () => {
+  it('accepts the same-origin proxy and explicit HTTPS API builds', () => {
+    expect(() => validateVercelApiBase('/api')).not.toThrow()
+    expect(() => validateVercelApiBase('https://api.example.com')).not.toThrow()
+    for (const base of [undefined, '', '//evil.example', '/other', 'http://api.example.com',
+      'https://user:password@api.example.com', 'https://api.example.com?secret=value']) {
+      expect(() => validateVercelApiBase(base)).toThrow('VITE_API_BASE_URL')
+    }
+  })
+
   it('creates the public shell for every application URL and a 404 document', async () => {
     const routes = JSON.parse(await readFile(join(process.cwd(), 'src/page-routes.json'), 'utf8'))
     const target = await output()
@@ -29,7 +38,11 @@ describe('Vercel static page URLs without rewrites', () => {
     expect(await readFile(new URL('404.html', target), 'utf8')).toBe(html)
     const config = JSON.parse(await readFile(join(process.cwd(), 'vercel.json'), 'utf8'))
     expect(config.cleanUrls).toBe(true)
-    expect(config).not.toHaveProperty('rewrites')
+    expect(config.rewrites).toEqual([{
+      source: '/api/:path*', destination: 'https://rag-enterprise-api.vercel.app/:path*',
+    }])
+    expect(config.headers).toContainEqual({source: '/api/:path*',
+      headers: [{key: 'Cache-Control', value: 'private, no-store'}]})
     expect(config).not.toHaveProperty('routes')
   })
 

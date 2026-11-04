@@ -1,6 +1,15 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 
+export function validateVercelApiBase(base) {
+  if (base === '/api') return
+  try {
+    const url = new URL(base || '')
+    if (url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash) return
+  } catch { /* Never include a possibly mistaken secret in the error. */ }
+  throw new Error('Set VITE_API_BASE_URL to /api for the Vercel proxy, or a public HTTPS backend URL.')
+}
+
 export async function prepareStaticRoutes(output, routes) {
   const html = await readFile(new URL('index.html', output), 'utf8')
   const paths = [...routes.workspace, ...routes.public]
@@ -15,12 +24,7 @@ export async function prepareStaticRoutes(output, routes) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   if (process.env.VERCEL === '1') {
-    let valid = false
-    try {
-      const url = new URL(process.env.VITE_API_BASE_URL || '')
-      valid = url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash
-    } catch { /* Fail the build without printing a possibly mistaken secret. */ }
-    if (!valid) throw new Error('Set VITE_API_BASE_URL to the public HTTPS backend URL in Vercel before building.')
+    validateVercelApiBase(process.env.VITE_API_BASE_URL)
   }
   const routes = JSON.parse(await readFile(new URL('../src/page-routes.json', import.meta.url), 'utf8'))
   await prepareStaticRoutes(new URL('../dist/', import.meta.url), routes)
